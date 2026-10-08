@@ -1,0 +1,2 @@
+# ceiling
+funge
