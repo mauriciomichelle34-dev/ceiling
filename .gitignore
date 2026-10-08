@@ -1,0 +1,32 @@
+# Python and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local data, trained weights and generated results
+/data/
+/prepared/
+/runs/
+/models/
+/predictions/
+/predictions_shared/
+/sharing/
+/tools/
+/work/
+*.pt
+*.pth
+*.onnx
+*.log
+
+# Credentials and editor settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
