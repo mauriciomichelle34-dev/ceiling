@@ -1,0 +1,45 @@
+{
+  "folders": [
+    {
+      "name": "ceiling",
+      "path": "."
+    }
+  ],
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.debugpy"
+    ]
+  },
+  "launch": {
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "启动菌丝体网页",
+        "type": "debugpy",
+        "request": "launch",
+        "program": "${workspaceFolder:ceiling}/start.py",
+        "cwd": "${workspaceFolder:ceiling}",
+        "console": "integratedTerminal",
+        "justMyCode": true
+      }
+    ]
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "启动菌丝体网页",
+        "type": "process",
+        "command": "${command:python.interpreterPath}",
+        "args": [
+          "${workspaceFolder:ceiling}/start.py"
+        ],
+        "options": {
+          "cwd": "${workspaceFolder:ceiling}"
+        },
+        "problemMatcher": []
+      }
+    ]
+  }
+}
