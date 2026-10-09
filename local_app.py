@@ -1,5 +1,6 @@
 """Local upload and segmentation app. See README.md for setup."""
 import argparse
+import hashlib
 import io
 import json
 import re
@@ -21,7 +22,7 @@ from sampling import make_plan, with_depths, csv_bytes, layout_svg
 from device_interface import PreviewDevice
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_MODEL = HERE/'runs'/'20260923_102628_721977'/'best_model.pt'
+DEFAULT_MODEL = HERE/'mycelium_v2.pt'
 MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
@@ -58,7 +59,8 @@ class Predictor:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
         self.config = checkpoint['config']
-        self.model_name = checkpoint_path.parent.name
+        self.model_name = self.config.get('model_version', checkpoint_path.stem)
+        self.model_sha256 = hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
         self.result_root = result_root or HERE/'predictions'
         self.network = UNet().to(self.device)
         self.network.load_state_dict(checkpoint['model'])
@@ -148,7 +150,9 @@ class Handler(BaseHTTPRequestHandler):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
-            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 4,
+            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 5,
+                                    'model': self.server.predictor.model_name,
+                                    'model_sha256': self.server.predictor.model_sha256,
                                     'sampling_order': 'outer_boundary_layers',
                                     'sampling_planner': True, 'hardware_ready': False,
                                     'shared': bool(getattr(self.server, 'public_origin_file', None)),
@@ -292,6 +296,9 @@ def main():
     parser.add_argument('--public-origin-file', type=Path)
     parser.add_argument('--result-root', type=Path)
     args = parser.parse_args()
+    if not args.model.is_file():
+        parser.error(f'模型文件不存在：{args.model}。请按 README.md 准备权重，或用 --model 指定已有模型文件。')
+    requested_hash = hashlib.sha256(args.model.read_bytes()).hexdigest()
     url = f'http://127.0.0.1:{args.port}'
     # Reopening the launcher reuses this app rather than starting a second model.
     from urllib.request import urlopen
@@ -299,18 +306,14 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != 4:
-                    raise SystemExit('旧版服务还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
+                if running.get('version') != 5 or running.get('model_sha256') != requested_hash:
+                    raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:
                     webbrowser.open(url)
                 return
     except Exception:
         pass
-    if not args.model.is_file():
-        parser.error(
-            f'模型文件不存在：{args.model}。请按 README.md 准备 best_model.pt，'
-            '或用 --model 指定已有模型文件。')
     print('Loading model...', flush=True)
     predictor = Predictor(args.model, args.result_root)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)

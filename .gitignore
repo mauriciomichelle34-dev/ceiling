@@ -16,6 +16,7 @@ venv/
 /tools/
 /work/
 *.pt
+!/mycelium_v2.pt
 *.pth
 *.onnx
 *.log

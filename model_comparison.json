@@ -1,0 +1,126 @@
+{
+  "groups": {
+    "val/trainset": {
+      "baseline": {
+        "count": 46,
+        "dice": 0.9902063436643228,
+        "precision": 0.9887925014858628,
+        "recall": 0.9917731078078146,
+        "fp": 601760,
+        "fn": 286024
+      },
+      "candidate": {
+        "count": 46,
+        "dice": 0.9891599822630223,
+        "precision": 0.9916449857480099,
+        "recall": 0.9868836634748258,
+        "fp": 398867,
+        "fn": 474082
+      }
+    },
+    "val/GS": {
+      "baseline": {
+        "count": 3,
+        "dice": 0.5068177699932594,
+        "precision": 0.3524391458546671,
+        "recall": 1.0,
+        "fp": 4565993,
+        "fn": 0
+      },
+      "candidate": {
+        "count": 3,
+        "dice": 0.9420488143621047,
+        "precision": 0.9014985073466782,
+        "recall": 0.9977214394642875,
+        "fp": 144964,
+        "fn": 8139
+      }
+    },
+    "val/TS": {
+      "baseline": {
+        "count": 3,
+        "dice": 0.8099324759213794,
+        "precision": 0.8004498320166231,
+        "recall": 0.8842304530896623,
+        "fp": 113222,
+        "fn": 313586
+      },
+      "candidate": {
+        "count": 3,
+        "dice": 0.9215631522793788,
+        "precision": 0.9657197216117739,
+        "recall": 0.8935412391016383,
+        "fp": 33160,
+        "fn": 300664
+      }
+    },
+    "test/testset": {
+      "baseline": {
+        "count": 50,
+        "dice": 0.9630393435620406,
+        "precision": 0.9377030476738685,
+        "recall": 0.9949084110660906,
+        "fp": 6109111,
+        "fn": 373579
+      },
+      "candidate": {
+        "count": 50,
+        "dice": 0.9752175981888178,
+        "precision": 0.9809530016809237,
+        "recall": 0.9710850602471025,
+        "fp": 1625067,
+        "fn": 3636325
+      }
+    },
+    "external/MYG": {
+      "baseline": {
+        "count": 10,
+        "dice": 0.7633543979323667,
+        "precision": 0.6746750494673346,
+        "recall": 0.9878991475257136,
+        "fp": 3137773,
+        "fn": 51437
+      },
+      "candidate": {
+        "count": 10,
+        "dice": 0.9469991104432962,
+        "precision": 0.9155221175711412,
+        "recall": 0.9901200619509558,
+        "fp": 678598,
+        "fn": 46006
+      }
+    },
+    "external/TEMP15": {
+      "baseline": {
+        "count": 10,
+        "dice": 0.8586447361138283,
+        "precision": 0.8113434720639002,
+        "recall": 0.9977329024909458,
+        "fp": 2504822,
+        "fn": 2660
+      },
+      "candidate": {
+        "count": 10,
+        "dice": 0.9417721206483189,
+        "precision": 0.9137771200947613,
+        "recall": 0.9741947019003894,
+        "fp": 492637,
+        "fn": 37331
+      }
+    }
+  },
+  "checkpoint_sha256": {
+    "baseline": "f1a1aa5bd5fa29c690c67b699da2c8078dd6a890bb3347c6dac2ec2fea0005e9",
+    "candidate": "0f8d13fd01e57ef9f29bc115722395320881292a7f4a6fa1e653d1a1c1f3bff9"
+  },
+  "thresholds": {
+    "baseline": 0.5,
+    "candidate": 0.5
+  },
+  "aggregation": "Mean per-image metrics at original resolution; FP/FN are pixel totals.",
+  "validation_policy": "Validation used for checkpoint selection. These are development results, not an untouched final test.",
+  "regression_policy": "Test/external labels excluded from fine-tuning and checkpoint selection; exact image hashes checked.",
+  "threshold_tuned": false,
+  "published_model_sha256": "20e340b769ee8434291701ab9f1bb2d5f7ea811e076b83e47c429cb6d30a5fab",
+  "published_weights_equal_to_training_checkpoint": true
+}

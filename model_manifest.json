@@ -1,0 +1,34 @@
+{
+  "model_version": "mycelium-v2-20261009",
+  "model_file": "mycelium_v2.pt",
+  "sha256": "20e340b769ee8434291701ab9f1bb2d5f7ea811e076b83e47c429cb6d30a5fab",
+  "training_checkpoint_sha256": "0f8d13fd01e57ef9f29bc115722395320881292a7f4a6fa1e653d1a1c1f3bff9",
+  "baseline_sha256": "f1a1aa5bd5fa29c690c67b699da2c8078dd6a890bb3347c6dac2ec2fea0005e9",
+  "selected_epoch": 4,
+  "epochs_run": 20,
+  "network_size": [
+    512,
+    384
+  ],
+  "threshold": 0.5,
+  "fine_tune_train_count": 425,
+  "validation_count": 52,
+  "regression_count": 70,
+  "new_training": {
+    "GS": 7,
+    "TS": 7
+  },
+  "new_validation": {
+    "GS": 3,
+    "TS": 3
+  },
+  "extra_fraction": 0.3,
+  "learning_rate": 0.0001,
+  "seed": 42,
+  "selection": "Equal-group mean validation Dice; threshold fixed at 0.5.",
+  "validation_limitation": "Only six new validation images; used for checkpoint selection. Not a blind final test.",
+  "base_grouping_limitation": "Base dish/time-series grouping remains unverified.",
+  "deduplication": "Exact file SHA-256. PO duplicates MYG; PDA duplicates ten GL test images.",
+  "training_images_included": false,
+  "local_paths_in_checkpoint": false
+}

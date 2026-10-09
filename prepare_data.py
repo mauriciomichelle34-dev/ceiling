@@ -5,6 +5,7 @@ Requires Pillow and numpy; does not modify the source dataset.
 """
 import argparse
 import csv
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -28,7 +29,7 @@ def collect(root, relative):
             mask.load()
             if im.size != mask.size:
                 raise ValueError(f'Size mismatch: {images[name]}')
-            if mask.mode != 'L' or mask.getextrema() != (0, 1):
+            if mask.mode != 'L' or not (0 <= mask.getextrema()[0] <= mask.getextrema()[1] <= 1):
                 raise ValueError(f'Expected grayscale 0/1 labels: {masks[name]}')
             rows.append({'id': name, 'group': relative,
                          'image': images[name].relative_to(root).as_posix(),
@@ -63,6 +64,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data-root', type=Path, default=Path(__file__).resolve().parent / 'data' / 'MyceliumSeg')
     parser.add_argument('--output-dir', type=Path, default=Path(__file__).resolve().parent / 'prepared')
+    parser.add_argument('--extra-root', type=Path, help='Optional folder containing GS, PO and TS.')
+    parser.add_argument('--base-prepared', type=Path, help='Preserve existing base split CSVs instead of reshuffling.')
+    parser.add_argument('--extra-val-per-group', type=int, default=3)
     args = parser.parse_args()
     root = args.data_root.resolve()
     groups = ['labeled-GL/trainset', 'labeled-GL/testset',
@@ -76,6 +80,62 @@ def main():
               'val': sorted(training[:validation_count], key=lambda r: r['id']),
               'test': data[groups[1]],
               'external': [r for g in groups[2:] for r in data[g]]}
+    if args.base_prepared:
+        base_report = json.loads((args.base_prepared/'report.json').read_text(encoding='utf-8'))
+        if Path(base_report['data_root']).resolve() != root:
+            raise ValueError('Base prepared data_root does not match --data-root')
+        for name in splits:
+            with (args.base_prepared/f'{name}.csv').open(encoding='utf-8-sig', newline='') as f:
+                preserved = list(csv.DictReader(f))
+            # Check the whole collection below: a saved split may use another seed.
+            splits[name] = preserved
+        expected = {(r['image'], r['mask']) for rows in data.values() for r in rows}
+        actual = [(r['image'], r['mask']) for rows in splits.values() for r in rows]
+        if set(actual) != expected or len(actual) != len(expected):
+            raise ValueError('Saved splits do not partition the base collection exactly once')
+    digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    known, skipped, extra_counts = {}, [], {}
+    for split, rows in splits.items():
+        unique_rows = []
+        for row in rows:
+            key = digest(root/row['image'])
+            if key in known:
+                if digest(root/row['mask']) != known[key][0]:
+                    raise ValueError('Duplicate image has inconsistent annotations: ' + row['image'])
+                if split in {'train', 'val'} or known[key][1] in {'train', 'val'}:
+                    raise ValueError('Base training/validation content leakage: ' + row['image'])
+                skipped.append({'image': row['image'], 'matches': known[key][2], 'split': known[key][1]})
+                continue
+            known[key] = (digest(root/row['mask']), split, row['image'])
+            unique_rows.append(row)
+        splits[split] = unique_rows
+    if args.extra_root:
+        if args.extra_val_per_group < 1:
+            parser.error('--extra-val-per-group must be positive')
+        extra_root = args.extra_root.resolve()
+        for group in ['GS', 'PO', 'TS']:
+            extra = []
+            for row in collect(extra_root, group):
+                image_path, mask_path = extra_root/row['image'], extra_root/row['mask']
+                key, mask_key = digest(image_path), digest(mask_path)
+                if key in known:
+                    if known[key][0] != mask_key:
+                        raise ValueError('Duplicate image has inconsistent annotations: ' + str(image_path))
+                    skipped.append({'image': str(image_path), 'matches': known[key][2], 'split': known[key][1]})
+                    continue
+                # Absolute extra paths allow the two source datasets to stay in place.
+                row.update(image=str(image_path), mask=str(mask_path), group='extra/'+group)
+                known[key] = (mask_key, 'extra', str(image_path))
+                extra.append(row)
+            if not extra:
+                extra_counts[group] = {'train': 0, 'val': 0}
+                continue
+            if len(extra) <= args.extra_val_per_group:
+                raise ValueError('Too few unique extra images for both splits: ' + group)
+            random.Random(42).shuffle(extra)
+            splits['val'].extend(sorted(extra[:args.extra_val_per_group], key=lambda r: r['id']))
+            splits['train'].extend(sorted(extra[args.extra_val_per_group:], key=lambda r: r['id']))
+            extra_counts[group] = {'train': len(extra)-args.extra_val_per_group, 'val': args.extra_val_per_group}
     all_ids = [r['id'] for rows in splits.values() for r in rows]
     if len(all_ids) != len(set(all_ids)):
         raise ValueError('Duplicate image IDs across splits')
@@ -86,8 +146,10 @@ def main():
             writer.writeheader()
             writer.writerows(rows)
     report = {'data_root': str(root), 'seed': 42,
+              'extra_root': str(args.extra_root.resolve()) if args.extra_root else None,
+              'extra_counts': extra_counts, 'skipped_duplicates': skipped,
               'counts': {name: len(rows) for name, rows in splits.items()},
-              'split_method': 'Provisional image-level split. If images share culture dishes or time series, use group-level splitting before reliable evaluation.',
+              'split_method': 'Base split preserved when --base-prepared is supplied; extra images stratified by source group, seed 42. Confirm independent dishes before using image-level splitting. Base culture/time-series grouping remains unverified.',
               'test_policy': 'Do not use test or external labels to select models or tune thresholds.',
               'source_files_modified': False}
     (args.output_dir / 'report.json').write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding='utf-8')

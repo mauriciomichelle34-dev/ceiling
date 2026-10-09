@@ -9,6 +9,7 @@ import json
 import random
 import time
 from datetime import datetime
+from collections import defaultdict
 from pathlib import Path
 
 import cv2
@@ -16,7 +17,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from torch.nn import functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
 from model import UNet
 
@@ -69,7 +70,8 @@ class Pairs(Dataset):
                 array = array[::-1]
         image = array[..., :3].astype(np.float32) / 255
         if self.augment:
-            image = np.clip(image * random.uniform(.9, 1.1), 0, 1)
+            image = np.clip((image-.5)*random.uniform(.9, 1.1)+.5, 0, 1)
+            image = np.clip(image * random.uniform(.85, 1.15), 0, 1)
         mask = array[..., 3].astype(np.float32)
         return torch.from_numpy(image.transpose(2, 0, 1).copy()), torch.from_numpy(mask[None].copy())
 
@@ -87,6 +89,7 @@ def run_epoch(model, loader, device, optimizer=None, precision='fp32'):
     training = optimizer is not None
     model.train(training)
     loss_total, dice_total, iou_total, count = 0., 0., 0., 0
+    per_image = []
     with torch.set_grad_enabled(training):
         for image, target in loader:
             image, target = image.to(device), target.to(device)
@@ -110,11 +113,13 @@ def run_epoch(model, loader, device, optimizer=None, precision='fp32'):
             intersection = (pred & truth).sum((1, 2, 3)).float()
             total = pred.sum((1, 2, 3)) + truth.sum((1, 2, 3))
             union = (pred | truth).sum((1, 2, 3)).float()
-            dice_total += ((2*intersection+1e-7)/(total+1e-7)).sum().item()
+            dice_values = ((2*intersection+1e-7)/(total+1e-7))
+            per_image.extend(dice_values.cpu().tolist())
+            dice_total += dice_values.sum().item()
             iou_total += ((intersection+1e-7)/(union+1e-7)).sum().item()
             count += image.shape[0]
             loss_total += loss.item()*image.shape[0]
-    return loss_total/count, dice_total/count, iou_total/count
+    return loss_total/count, dice_total/count, iou_total/count, per_image
 
 
 def save_preview(model, dataset, device, dest):
@@ -157,7 +162,14 @@ def main():
     parser.add_argument('--smoke-test', action='store_true')
     parser.add_argument('--precision', choices=['auto', 'bf16', 'fp32'], default='auto')
     parser.add_argument('--run-root', type=Path, default=HERE/'runs')
+    parser.add_argument('--init-model', type=Path, help='Fine-tune a compatible U-Net checkpoint.')
+    parser.add_argument('--learning-rate', type=float, default=.001)
+    parser.add_argument('--extra-fraction', type=float, default=0., help='Sampling fraction for extra/ groups; 0 uses uniform image sampling.')
+    parser.add_argument('--group-balanced-selection', action='store_true')
+    parser.add_argument('--cache-dir', type=Path, default=HERE/'work'/'mycelium_cache')
     args = parser.parse_args()
+    if args.learning_rate <= 0 or not 0 <= args.extra_fraction < 1:
+        parser.error('Positive learning rate and 0 <= extra-fraction < 1 required.')
     if args.epochs < 1 or args.batch_size < 1 or min(args.width, args.height) < 32 or args.width % 16 or args.height % 16:
         parser.error('Positive epochs/batch size required; width and height must be multiples of 16, at least 32.')
     random.seed(42)
@@ -183,14 +195,17 @@ def main():
     out = args.run_root / ('smoke_' + stamp if args.smoke_test else stamp)
     out.mkdir(parents=True, exist_ok=False)
     if args.smoke_test:
-        train_rows, val_rows = train_rows[:8], val_rows[:4]
+        def smoke_subset(rows):
+            groups = sorted({r['group'] for r in rows})
+            return [row for group in groups for row in [r for r in rows if r['group'] == group][:2]]
+        train_rows, val_rows = smoke_subset(train_rows), smoke_subset(val_rows)
         args.epochs = 1
-    config = {**vars(args), 'prepared': str(args.prepared.resolve()), 'data_root': str(root),
+    config = {**{k: str(v.resolve()) if isinstance(v, Path) else v for k, v in vars(args).items()}, 'prepared': str(args.prepared.resolve()), 'data_root': str(root),
               'run_root': str(args.run_root.resolve()), 'precision_used': precision,
               'device': str(device), 'train_count': len(train_rows), 'val_count': len(val_rows),
               'architecture': 'UNet GroupNorm base16', 'seed': 42,
               'threshold': .5, 'resize': f'whole image, {args.width}x{args.height}; nearest-neighbor masks',
-              'selection': 'highest mean per-image validation Dice',
+              'selection': 'highest equal-group mean validation Dice' if args.group_balanced_selection else 'highest mean per-image validation Dice',
               'test_used': False, 'external_used': False,
               'split_note': report['split_method'],
               'torch_version': str(torch.__version__)}
@@ -202,41 +217,61 @@ def main():
             writer.writerows(rows)
     print('Output:', out, flush=True)
     print('First run prepares a smaller local cache; source images stay unchanged.', flush=True)
-    cache = workspace/'work'/'mycelium_cache'
+    cache = args.cache_dir
     train_set = Pairs(root, train_rows, cache, True, args.width, args.height)
     val_set = Pairs(root, val_rows, cache, False, args.width, args.height)
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=0)
+    sampler = None
+    if args.extra_fraction:
+        extra_groups = sorted({r['group'] for r in train_rows if r['group'].startswith('extra/')})
+        base_count = sum(not r['group'].startswith('extra/') for r in train_rows)
+        if not extra_groups or not base_count:
+            raise ValueError('Balanced sampling requires base images and extra/ groups')
+        counts = {g: sum(r['group'] == g for r in train_rows) for g in extra_groups}
+        weights = [args.extra_fraction/len(extra_groups)/counts[r['group']] if r['group'] in counts
+                   else (1-args.extra_fraction)/base_count for r in train_rows]
+        sampler = WeightedRandomSampler(weights, len(train_rows), replacement=True)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=sampler is None, sampler=sampler, num_workers=0)
     val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, num_workers=0)
     model = UNet().to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=.001, weight_decay=.0001)
+    if args.init_model:
+        initial = torch.load(args.init_model, map_location='cpu', weights_only=True)
+        model.load_state_dict(initial['model'])
+        print('Fine-tuning:', args.init_model, flush=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=.0001)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     best = -1.
-    fields = ['epoch', 'train_loss', 'val_loss', 'val_dice', 'val_iou', 'seconds']
+    fields = ['epoch', 'train_loss', 'val_loss', 'val_dice', 'val_iou', 'selection_score', 'group_dice', 'seconds']
     with (out/'history.csv').open('w', encoding='utf-8', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for epoch in range(1, args.epochs+1):
             start = time.perf_counter()
-            train_loss, _, _ = run_epoch(model, train_loader, device, optimizer, precision)
-            val_loss, dice, iou = run_epoch(model, val_loader, device, precision=precision)
+            train_loss, _, _, _ = run_epoch(model, train_loader, device, optimizer, precision)
+            val_loss, dice, iou, values = run_epoch(model, val_loader, device, precision=precision)
+            grouped = defaultdict(list)
+            for row, value in zip(val_rows, values):
+                grouped[row['group']].append(value)
+            group_dice = {g: float(np.mean(v)) for g, v in grouped.items()}
+            score = float(np.mean(list(group_dice.values()))) if args.group_balanced_selection else dice
             scheduler.step()
             record = dict(epoch=epoch, train_loss=train_loss, val_loss=val_loss,
-                          val_dice=dice, val_iou=iou, seconds=round(time.perf_counter()-start, 1))
+                          val_dice=dice, val_iou=iou, selection_score=score,
+                          group_dice=json.dumps(group_dice), seconds=round(time.perf_counter()-start, 1))
             writer.writerow(record)
             f.flush()
             payload = {'model': model.state_dict(), 'config': config, 'epoch': epoch,
-                       'val_dice': dice, 'val_iou': iou}
+                       'val_dice': dice, 'val_iou': iou, 'selection_score': score, 'group_dice': group_dice}
             save_checkpoint(out/'last_model.pt', payload)
-            improved = dice > best
+            improved = score > best
             if improved:
-                best = dice
+                best = score
                 save_checkpoint(out/'best_model.pt', payload)
                 save_preview(model, val_set, device, out/'best_preview.png')
-            print(f"Epoch {epoch:02d}/{args.epochs} | loss={train_loss:.4f} | val Dice={dice:.4f} | val IoU={iou:.4f} | {record['seconds']}s" + (' | saved best' if improved else ''), flush=True)
+            print(f"Epoch {epoch:02d}/{args.epochs} | loss={train_loss:.4f} | val Dice={dice:.4f} | score={score:.4f} | groups={group_dice} | {record['seconds']}s" + (' | saved best' if improved else ''), flush=True)
     # Confirm the saved model can be reloaded for later inference.
     checkpoint = torch.load(out/'best_model.pt', map_location=device, weights_only=True)
     model.load_state_dict(checkpoint['model'])
-    print(f'Finished. Best validation Dice: {best:.4f}', flush=True)
+    print(f'Finished. Best validation selection score: {best:.4f}', flush=True)
     print(f'Model: {out / "best_model.pt"}', flush=True)
     print(f'Preview: {out / "best_preview.png"}', flush=True)
     if args.smoke_test:
