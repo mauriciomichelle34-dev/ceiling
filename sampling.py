@@ -49,6 +49,23 @@ def validate_calibration(data, width, height):
                 image_width=width, image_height=height)
 
 
+def measure_area(mask, calibration):
+    """Measure full-resolution foreground inside the calibrated dish circle."""
+    height, width = mask.shape
+    c = validate_calibration(calibration, width, height)
+    y, x = np.ogrid[:height, :width]
+    inside = ((x-c['center_x_px'])**2 + (y-c['center_y_px'])**2
+              <= (c['dish_diameter_px']/2)**2)
+    foreground_pixels = int(np.count_nonzero((mask > 0) & inside))
+    dish_area = math.pi * (c['dish_diameter_mm']/2)**2
+    # Pixel-center counting can slightly exceed a circle's analytic area at
+    # the boundary. Keep the estimate within the physical dish area.
+    area = min(foreground_pixels * c['mm_per_pixel']**2, dish_area)
+    return {'mycelium_area_mm2': area, 'dish_area_mm2': dish_area,
+            'dish_coverage_percent': 100*area/dish_area,
+            'foreground_pixels': foreground_pixels, 'calibration': c}
+
+
 class Geometry:
     def __init__(self, mask, calibration, radius):
         self.h, self.w = mask.shape

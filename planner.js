@@ -6,6 +6,39 @@ const profileKey = 'mycelium-fixed-calibration-v1';
 const geometryFields = ['center_x_px', 'center_y_px', 'dish_diameter_px', 'dish_diameter_mm'];
 const calibrationInputs = ['centerX', 'centerY', 'dishPx', 'dishMm'];
 const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload', 'deviceDownload'];
+let areaKey = '', areaTimer = null, areaSequence = 0;
+
+function showArea(data) {
+  $('myceliumArea').textContent = data.mycelium_area_mm2.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+  $('dishCoverage').textContent = data.dish_coverage_percent.toFixed(2);
+  $('areaInfo').textContent = `培养皿总面积 ${data.dish_area_mm2.toLocaleString('zh-CN', {maximumFractionDigits: 2})} mm² · 按标定圆内识别出的菌丝区域估算。`;
+}
+function updateArea() {
+  let c;
+  try { c = calibration(); } catch (error) {
+    clearTimeout(areaTimer); areaKey = ''; areaSequence++;
+    $('myceliumArea').textContent = '—'; $('dishCoverage').textContent = '—';
+    $('areaInfo').textContent = error.message;
+    return;
+  }
+  const photo = current, key = JSON.stringify([photo.meta.id, c]);
+  if (key === areaKey) return;
+  clearTimeout(areaTimer); areaKey = key;
+  const sequence = ++areaSequence;
+  if (photo.area?.key === key) { showArea(photo.area.data); return; }
+  $('myceliumArea').textContent = '—'; $('dishCoverage').textContent = '—';
+  $('areaInfo').textContent = '正在测算菌丝体面积…';
+  areaTimer = setTimeout(async () => {
+    try {
+      const data = await request('/api/area', {prediction_id: photo.meta.id, calibration: c});
+      if (sequence !== areaSequence || photo !== current) return;
+      photo.area = {key, data}; showArea(data);
+    } catch (error) {
+      if (sequence !== areaSequence || photo !== current) return;
+      areaKey = ''; $('areaInfo').textContent = `面积测算失败：${error.message} 修改标定参数可重试。`;
+    }
+  }, 250);
+}
 
 function notice(message, error = false) {
   $('notice').textContent = message;
@@ -92,6 +125,7 @@ function controls() {
   link('maskDownload', current?.meta.mask, has && !busy);
   if (geometric || depths) $('actions').hidden = true;
   updateScale();
+  updateArea();
 }
 function updateScale() {
   try {
@@ -313,7 +347,7 @@ $('previewActions').addEventListener('click', async () => {
 async function health() {
   try {
     const response = await fetch('/api/health'); if (!response.ok) throw Error(); const data = await response.json();
-    if (!data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
+    if (!data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
     $('statusDot').classList.toggle('ready', ready);
     if (data.shared) $('privacy').textContent = '无密码临时共享：照片经 Cloudflare 转到服务提供者电脑处理并保存。';
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }

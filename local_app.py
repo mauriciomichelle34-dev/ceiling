@@ -18,7 +18,7 @@ import torch
 from PIL import Image, UnidentifiedImageError
 
 from model import UNet
-from sampling import make_plan, with_depths, csv_bytes, layout_svg
+from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
 from device_interface import PreviewDevice
 
 HERE = Path(__file__).resolve().parent
@@ -150,7 +150,8 @@ class Handler(BaseHTTPRequestHandler):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
-            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 5,
+            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 6,
+                                    'area_measurement': True,
                                     'model': self.server.predictor.model_name,
                                     'model_sha256': self.server.predictor.model_sha256,
                                     'sampling_order': 'outer_boundary_layers',
@@ -207,6 +208,10 @@ class Handler(BaseHTTPRequestHandler):
                 acquired = self.server.predictor.lock.acquire(timeout=60)
                 if not acquired:
                     return self.reply(429, {'error': '服务忙，请稍后重试。'})
+                if self.path == '/api/area':
+                    with Image.open(folder/'mask.png') as image:
+                        mask = np.asarray(image)
+                    return self.reply(200, measure_area(mask, payload.get('calibration')))
                 if self.path == '/api/plans/create':
                     with Image.open(folder/'mask.png') as image:
                         mask = np.asarray(image)
@@ -237,7 +242,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(400, {'error': str(exc)})
         except Exception as exc:
             print(f'Planning failed: {exc}', flush=True)
-            self.reply(500, {'error': '规划失败，请查看启动窗口或调整参数后重试。'})
+            self.reply(500, {'error': '计算失败，请查看启动窗口或调整参数后重试。'})
 
     def do_POST(self):
         origin = self.headers.get('Origin')
@@ -247,7 +252,7 @@ class Handler(BaseHTTPRequestHandler):
             allowed.add(public_origin)
         if not self.valid_host() or (origin and origin not in allowed):
             return self.reply(403, {'error': '仅支持从本地页面提交图片。'})
-        if self.path in ('/api/plans/create', '/api/plans/update'):
+        if self.path in ('/api/area', '/api/plans/create', '/api/plans/update'):
             return self.handle_plan()
         if self.path != '/api/predict':
             return self.reply(404, {'error': '未找到接口。'})
@@ -306,7 +311,7 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != 5 or running.get('model_sha256') != requested_hash:
+                if running.get('version') != 6 or running.get('model_sha256') != requested_hash:
                     raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:

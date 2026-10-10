@@ -23,7 +23,7 @@
     </section>
     <section class="panel">
       <h2><span class="step">02</span> 培养皿标定 <span class="tag" id="calibrationBadge">待确认</span></h2>
-      <p class="help">用培养皿的实际直径，把照片中的像素换成毫米。照片尺寸、位置固定时可保存复用。</p>
+      <p class="help">填写实际直径后自动测算菌丝面积。请确认青色圆与培养皿匹配；照片尺寸、位置固定时可保存标定复用。</p>
       <label for="dishMm">培养皿实际直径 <span>mm</span></label>
       <input id="dishMm" type="number" min="0.001" step="any" placeholder="填写实测直径">
       <details id="calibrationDetails">
@@ -50,12 +50,16 @@
   <section class="content">
     <div class="title-row"><div><div class="eyebrow">IMAGE → REGION → SAMPLING POINTS</div><h1>从菌丝区域到取样位置</h1></div><span class="session-label">规划模式</span></div>
     <div id="notice" class="notice" role="status" aria-live="polite">上传照片，确认标定，再生成取样排布。</div>
+    <section class="area-panel" aria-label="菌丝体面积测算">
+      <div class="area-stats" aria-live="polite"><div><span>菌丝体面积</span><strong id="myceliumArea">—</strong><small>mm²</small></div><div><span>占培养皿面积</span><strong id="dishCoverage">—</strong><small>%</small></div></div>
+      <p class="muted" id="areaInfo">上传照片并填写培养皿实际直径后自动计算。</p>
+    </section>
     <section class="viewer-panel">
       <div class="viewer-head"><strong id="filename">培养皿预览</strong><div class="viewer-options"><label><input id="showMask" type="checkbox" checked> 菌丝区域</label><label><input id="showNumbers" type="checkbox" checked> 编号</label><select id="zoom" aria-label="预览缩放"><option value="1">适应窗口</option><option value="1.5">150%</option><option value="2">200%</option><option value="3">300%</option></select></div></div>
       <div id="viewport" class="viewport"><div id="empty" class="empty"><span class="dish-icon">◎</span><strong>等待一张培养皿照片</strong><p>识别结果、标定圆和取样点将在这里显示。</p></div><canvas id="canvas" hidden aria-label="菌丝区域和取样圆预览"></canvas></div>
       <div class="viewer-foot"><div class="legend"><span><i class="green"></i>菌丝预测</span><span><i class="gold"></i>取样圆</span><span><i class="cyan"></i>标定圆</span></div><a id="maskDownload" class="text-link disabled">下载原始标注 PNG</a></div>
     </section>
-    <div class="stats"><div><span>取样点</span><strong id="pointCount">—</strong><small>个</small></div><div><span>预测区域覆盖率</span><strong id="coverage">—</strong><small>%</small></div><div class="status-stat"><span>规划状态</span><strong id="planStatus">尚未生成</strong><small id="planDetails">X 向右 · Y 向上 · 原点在培养皿中心</small></div></div>
+    <div class="stats"><div><span>取样点</span><strong id="pointCount">—</strong><small>个</small></div><div><span>取样覆盖菌丝区域</span><strong id="coverage">—</strong><small>%</small></div><div class="status-stat"><span>规划状态</span><strong id="planStatus">尚未生成</strong><small id="planDetails">X 向右 · Y 向上 · 原点在培养皿中心</small></div></div>
     <section class="panel points-panel">
       <div class="section-head"><div><h2>取样点坐标</h2><p class="help" id="pointHint">按编号从外层向内层取样；Z 留空时使用统一深度。</p></div><button id="saveDepths" class="secondary" disabled>保存深度修改</button></div>
       <div class="table-wrap"><table><thead><tr><th>编号</th><th>层次</th><th>X / mm</th><th>Y / mm</th><th>取样深度 Z / mm</th><th>深度设置</th></tr></thead><tbody id="pointRows"><tr><td colspan="6" class="table-empty">生成排布后显示坐标。</td></tr></tbody></table></div>
