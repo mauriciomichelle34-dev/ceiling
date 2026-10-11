@@ -1,22 +1,61 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const photos = [];
-let current = null, ready = false, busy = false, picking = null, selected = null;
+let current = null, ready = false, busy = false, uploading = false, picking = null, selected = null;
 const profileKey = 'mycelium-fixed-calibration-v1';
 const geometryFields = ['center_x_px', 'center_y_px', 'dish_diameter_px', 'dish_diameter_mm'];
 const calibrationInputs = ['centerX', 'centerY', 'dishPx', 'dishMm'];
 const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload', 'deviceDownload'];
 let areaKey = '', areaTimer = null, areaSequence = 0;
+const RECOGNITION_MS = 800;
+const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
+let areaAnimation = null, areaAnimationFrame = null, displayedAreaKey = '';
+
+function cancelAreaAnimation() {
+  if (areaAnimationFrame !== null) cancelAnimationFrame(areaAnimationFrame);
+  areaAnimationFrame = null; areaAnimation = null; displayedAreaKey = '';
+}
+function finishAreaAnimation(animation) {
+  if (animation.sequence !== areaSequence || animation.photo !== current || animation.key !== areaKey) return;
+  if (areaAnimationFrame !== null) cancelAnimationFrame(areaAnimationFrame);
+  areaAnimationFrame = null; areaAnimation = null; displayedAreaKey = animation.key;
+  showArea(animation.data); draw();
+}
+function presentArea(photo, key, sequence, c, data) {
+  const animation = {photo, key, sequence, c, data, started: null, progress: 0};
+  if (motionPreference.matches || document.hidden || !data.foreground_pixels || !photo.region) {
+    finishAreaAnimation(animation); return;
+  }
+  areaAnimation = animation;
+  $('areaPanel').dataset.phase = 'recognizing';
+  $('areaInfo').textContent = '正在描绘识别出的菌丝区域…';
+  const frame = timestamp => {
+    if (areaAnimation !== animation || sequence !== areaSequence || photo !== current || key !== areaKey) return;
+    if (animation.started === null) animation.started = timestamp;
+    animation.progress = Math.min(1, (timestamp-animation.started)/RECOGNITION_MS);
+    if (animation.progress >= 1) { finishAreaAnimation(animation); return; }
+    draw(); areaAnimationFrame = requestAnimationFrame(frame);
+  };
+  areaAnimationFrame = requestAnimationFrame(frame);
+}
 
 function showArea(data) {
+  $('areaPanel').dataset.phase = 'ready';
+  $('areaPanel').setAttribute('aria-busy', 'false');
   $('myceliumArea').textContent = data.mycelium_area_mm2.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   $('dishCoverage').textContent = data.dish_coverage_percent.toFixed(2);
   $('areaInfo').textContent = `培养皿总面积 ${data.dish_area_mm2.toLocaleString('zh-CN', {maximumFractionDigits: 2})} mm² · 按标定圆内识别出的菌丝区域估算。`;
 }
 function updateArea() {
   let c;
-  try { c = calibration(); } catch (error) {
+  try {
+    if (uploading) throw Error('正在识别新照片…');
+    c = calibration();
+  } catch (error) {
     clearTimeout(areaTimer); areaKey = ''; areaSequence++;
+    cancelAreaAnimation();
+    $('areaPanel').dataset.phase = 'waiting';
+    $('areaPanel').setAttribute('aria-busy', String(uploading));
     $('myceliumArea').textContent = '—'; $('dishCoverage').textContent = '—';
     $('areaInfo').textContent = error.message;
     return;
@@ -25,17 +64,22 @@ function updateArea() {
   if (key === areaKey) return;
   clearTimeout(areaTimer); areaKey = key;
   const sequence = ++areaSequence;
-  if (photo.area?.key === key) { showArea(photo.area.data); return; }
+  cancelAreaAnimation();
+  $('areaPanel').dataset.phase = 'pending';
+  $('areaPanel').setAttribute('aria-busy', 'true');
   $('myceliumArea').textContent = '—'; $('dishCoverage').textContent = '—';
   $('areaInfo').textContent = '正在测算菌丝体面积…';
+  if (photo.area?.key === key) { presentArea(photo, key, sequence, c, photo.area.data); return; }
   areaTimer = setTimeout(async () => {
     try {
       const data = await request('/api/area', {prediction_id: photo.meta.id, calibration: c});
       if (sequence !== areaSequence || photo !== current) return;
-      photo.area = {key, data}; showArea(data);
+      photo.area = {key, data}; presentArea(photo, key, sequence, c, data);
     } catch (error) {
       if (sequence !== areaSequence || photo !== current) return;
-      areaKey = ''; $('areaInfo').textContent = `面积测算失败：${error.message} 修改标定参数可重试。`;
+      areaKey = ''; cancelAreaAnimation(); draw();
+      $('areaPanel').dataset.phase = 'error'; $('areaPanel').setAttribute('aria-busy', 'false');
+      $('areaInfo').textContent = `面积测算失败：${error.message} 修改标定参数可重试。`;
     }
   }, 250);
 }
@@ -161,7 +205,7 @@ function getProfile(meta) {
 }
 async function upload(files) {
   if (busy || !ready || !files.length) return;
-  capture(); busy = true; picking = null; controls();
+  capture(); busy = true; uploading = true; picking = null; controls(); draw();
   const errors = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i]; notice(`正在识别 ${i + 1} / ${files.length}：${file.name}`);
@@ -169,10 +213,13 @@ async function upload(files) {
       if (file.size > 40 * 1024 * 1024) throw Error('单张图片不能超过 40 MB。');
       if (!/\.(jpe?g|png)$/i.test(file.name)) throw Error('请选择 JPG 或 PNG 图片。');
       const meta = await request('/api/predict', file, true, file.name);
-      const [original, overlay] = await Promise.all([loadImage(meta.original), loadImage(meta.overlay)]);
+      const [original, region, regionOutline] = await Promise.all([
+        loadImage(meta.original), loadImage(meta.region), loadImage(meta.region_outline)
+      ]);
       const profile = getProfile(meta), c = profile || meta.dish_suggestion;
       const photo = {
-        meta, original, overlay, plan: null, overrides: {}, profileUsed: Boolean(profile),
+        meta, original, region, regionOutline, glowCanvas: document.createElement('canvas'),
+        plan: null, overrides: {}, profileUsed: Boolean(profile),
         fields: {centerX: String(c.center_x_px), centerY: String(c.center_y_px), dishPx: String(c.dish_diameter_px),
           dishMm: profile ? String(c.dish_diameter_mm) : '', diameter: $('diameter').value, gap: $('gap').value, defaultZ: $('defaultZ').value}
       };
@@ -181,7 +228,7 @@ async function upload(files) {
       showPhoto(photo);
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
-  busy = false; $('files').value = ''; controls();
+  busy = false; uploading = false; $('files').value = ''; controls(); draw();
   if (errors.length) notice(errors.join('；'), true);
   else notice(current.profileUsed ? '已复用固定拍摄标定。检查青色圆与培养皿匹配后，生成排布。' : '菌丝识别完成。请填写实际直径，并检查青色圆是否与培养皿匹配。');
 }
@@ -233,16 +280,55 @@ function selectPoint(id, scroll = true) {
   $('pointHint').textContent = `选中点 ${id} · 第 ${p.layer ?? '—'} 层：X ${p.x_mm.toFixed(3)} / Y ${p.y_mm.toFixed(3)} mm。Z 留空时使用统一深度。`;
   draw();
 }
+function drawRegion(ctx, m, unit) {
+  if (!$('showMask').checked || !current.region) return;
+  const animation = areaAnimation?.photo === current ? areaAnimation : null;
+  if (!animation && displayedAreaKey !== areaKey) return;
+  if (!animation && !displayedAreaKey) return;
+  const c = animation ? animation.c : current.area.data.calibration;
+  ctx.save();
+  ctx.beginPath(); ctx.arc(c.center_x_px, c.center_y_px, c.dish_diameter_px/2, 0, Math.PI*2); ctx.clip();
+  const progress = animation?.progress ?? 1;
+  const bounds = current.meta.region_bounds || [0, 0, m.width, m.height];
+  const left = Math.max(bounds[0], c.center_x_px-c.dish_diameter_px/2);
+  const right = Math.min(bounds[0]+bounds[2], c.center_x_px+c.dish_diameter_px/2);
+  const band = Math.max(8*unit, (right-left)*.17);
+  const eased = progress*progress*(3-2*progress);
+  const sweep = left-band+(right-left+2*band)*eased;
+  ctx.save(); ctx.beginPath(); ctx.rect(0, 0, animation ? sweep : m.width, m.height); ctx.clip();
+  ctx.globalAlpha = .45; ctx.drawImage(current.region, 0, 0, m.width, m.height); ctx.restore();
+  if (animation) {
+    const fade = progress > .82 ? (1-progress)/.18 : 1;
+    ctx.save(); ctx.globalAlpha = (.25+.7*Math.sin(Math.PI*progress))*fade;
+    ctx.shadowColor = '#e1fff0'; ctx.shadowBlur = 10*unit;
+    ctx.drawImage(current.regionOutline, 0, 0, m.width, m.height); ctx.restore();
+    const glow = current.glowCanvas;
+    if (glow.width !== current.region.width || glow.height !== current.region.height) {
+      glow.width = current.region.width; glow.height = current.region.height;
+    }
+    const g = glow.getContext('2d'), scale = glow.width/m.width;
+    g.clearRect(0, 0, glow.width, glow.height); g.drawImage(current.region, 0, 0);
+    g.globalCompositeOperation = 'source-in';
+    const gradient = g.createLinearGradient((sweep-band)*scale, 0, (sweep+band)*scale, 0);
+    gradient.addColorStop(0, 'rgba(235,255,246,0)'); gradient.addColorStop(.5, `rgba(245,255,250,${.7*fade})`); gradient.addColorStop(1, 'rgba(235,255,246,0)');
+    g.fillStyle = gradient; g.fillRect(0, 0, glow.width, glow.height); g.globalCompositeOperation = 'source-over';
+    ctx.drawImage(glow, 0, 0, m.width, m.height);
+  }
+  ctx.restore();
+}
 function draw() {
   if (!current) return;
   const canvas = $('canvas'), m = current.meta, ratio = Math.min(1, 1800 / m.width);
-  canvas.width = Math.round(m.width * ratio); canvas.height = Math.round(m.height * ratio);
+  const width = Math.round(m.width * ratio), height = Math.round(m.height * ratio);
+  if (canvas.width !== width) canvas.width = width;
+  if (canvas.height !== height) canvas.height = height;
   const fit = Math.max(180, $('viewport').clientWidth - 34), z = Number($('zoom').value);
   canvas.style.width = `${fit * z}px`; canvas.style.height = `${fit * z * m.height / m.width}px`;
   canvas.classList.toggle('picking', Boolean(picking));
-  const ctx = canvas.getContext('2d'); ctx.drawImage($('showMask').checked ? current.overlay : current.original, 0, 0, canvas.width, canvas.height);
+  const ctx = canvas.getContext('2d'); ctx.drawImage(current.original, 0, 0, canvas.width, canvas.height);
   ctx.save(); ctx.scale(canvas.width / m.width, canvas.height / m.height);
   const unit = m.width / canvas.width, cx = Number($('centerX').value), cy = Number($('centerY').value), d = Number($('dishPx').value);
+  drawRegion(ctx, m, unit);
   if (Number.isFinite(cx) && Number.isFinite(cy) && d > 0) {
     ctx.strokeStyle = '#63d2d8'; ctx.lineWidth = 1.5 * unit; ctx.setLineDash([8 * unit, 5 * unit]);
     ctx.beginPath(); ctx.arc(cx, cy, d / 2, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
@@ -334,6 +420,12 @@ $('canvas').addEventListener('click', event => {
 });
 for (const id of ['showMask', 'showNumbers', 'zoom']) $(id).addEventListener('change', draw);
 window.addEventListener('resize', draw);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && areaAnimation) finishAreaAnimation(areaAnimation);
+});
+motionPreference.addEventListener('change', () => {
+  if (motionPreference.matches && areaAnimation) finishAreaAnimation(areaAnimation);
+});
 $('generate').addEventListener('click', generate);
 $('saveDepths').addEventListener('click', saveDepths);
 $('applyDepth').addEventListener('click', saveDepths);
@@ -347,7 +439,7 @@ $('previewActions').addEventListener('click', async () => {
 async function health() {
   try {
     const response = await fetch('/api/health'); if (!response.ok) throw Error(); const data = await response.json();
-    if (!data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
+    if (!data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
     $('statusDot').classList.toggle('ready', ready);
     if (data.shared) $('privacy').textContent = '无密码临时共享：照片经 Cloudflare 转到服务提供者电脑处理并保存。';
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }

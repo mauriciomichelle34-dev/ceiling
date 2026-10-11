@@ -52,6 +52,23 @@ def suggest_dish(source):
             'dish_diameter_px': min(width, height)*.85, 'source': 'estimate_requires_review'}
 
 
+def save_region_previews(mask, preview_size, folder):
+    """Save transparent animation layers without changing the original mask."""
+    selection = cv2.resize(mask, preview_size, interpolation=cv2.INTER_NEAREST) > 0
+    region = np.zeros((*selection.shape, 4), dtype=np.uint8)
+    region[..., :3] = (0, 255, 100)
+    region[..., 3] = selection.astype(np.uint8)*255
+    Image.fromarray(region).save(folder/'region.png')
+    edge = cv2.morphologyEx(selection.astype(np.uint8), cv2.MORPH_GRADIENT,
+                            np.ones((3, 3), dtype=np.uint8),
+                            borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    outline = np.full((*selection.shape, 4), 255, dtype=np.uint8)
+    outline[..., 3] = edge*255
+    Image.fromarray(outline).save(folder/'region_outline.png')
+    bounds = list(cv2.boundingRect(mask))
+    return selection, bounds if bounds[2] and bounds[3] else None
+
+
 class Predictor:
     def __init__(self, checkpoint_path, result_root=None):
         torch.set_num_threads(4)
@@ -92,7 +109,7 @@ class Predictor:
         preview = source.copy()
         preview.thumbnail((1400, 1050), Image.Resampling.LANCZOS)
         preview.save(folder/'original.jpg', quality=92)
-        selection = cv2.resize(mask, preview.size, interpolation=cv2.INTER_NEAREST) > 0
+        selection, region_bounds = save_region_previews(mask, preview.size, folder)
         overlay = np.asarray(preview).copy()
         overlay[selection] = (.55*overlay[selection]+.45*np.array([0, 255, 100])).astype(np.uint8)
         Image.fromarray(overlay).save(folder/'overlay.jpg', quality=92)
@@ -101,6 +118,9 @@ class Predictor:
                 'original': f'/results/{identifier}/original.jpg',
                 'overlay': f'/results/{identifier}/overlay.jpg',
                 'mask': f'/results/{identifier}/mask.png',
+                'region': f'/results/{identifier}/region.png',
+                'region_outline': f'/results/{identifier}/region_outline.png',
+                'region_bounds': region_bounds,
                 'dish_suggestion': suggest_dish(source)}
         (folder/'metadata.json').write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
         return meta
@@ -150,8 +170,8 @@ class Handler(BaseHTTPRequestHandler):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
-            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 6,
-                                    'area_measurement': True,
+            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 7,
+                                    'area_measurement': True, 'region_animation': True,
                                     'model': self.server.predictor.model_name,
                                     'model_sha256': self.server.predictor.model_sha256,
                                     'sampling_order': 'outer_boundary_layers',
@@ -174,7 +194,7 @@ class Handler(BaseHTTPRequestHandler):
             if kind == 'layout.svg':
                 return self.reply(200, layout_svg(plan, (folder/'original.jpg').read_bytes()), 'image/svg+xml', stem+'_sampling.svg')
             return self.reply(200, plan, download=stem+'_plan.json')
-        match = re.fullmatch(r'/results/([0-9a-f]{32})/(mask\.png|original\.jpg|overlay\.jpg)', path)
+        match = re.fullmatch(r'/results/([0-9a-f]{32})/(mask\.png|original\.jpg|overlay\.jpg|region\.png|region_outline\.png)', path)
         if match:
             folder = self.server.predictor.result_root/match[1]
             target = folder/match[2]
@@ -311,7 +331,7 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != 6 or running.get('model_sha256') != requested_hash:
+                if running.get('version') != 7 or running.get('model_sha256') != requested_hash:
                     raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:
