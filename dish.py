@@ -155,21 +155,3 @@ def restrict_to_dish(mask, boundary):
     return ((mask > 0) & inside).astype(np.uint8)
 
 
-def prepare_model_image(source, boundary):
-    """Replace bright exterior interference with the photo's dark background.
-
-    Keep the ordinary background texture and every dish pixel unchanged; a
-    solid black exterior introduces a sharp new edge and changes model input.
-    """
-    support = restrict_to_dish(np.ones((source.height, source.width), np.uint8),
-                              dict(boundary, radius_px=boundary['outer_radius_px']))
-    image = np.asarray(source).copy()
-    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
-    step = max(1, max(source.size)//900)
-    samples = image[::step, ::step]
-    dark = (support[::step, ::step] == 0) & (gray[::step, ::step] <= 120)
-    if dark.sum() < 64:
-        dark = gray[::step, ::step] <= 120
-    background = np.median(samples[dark], axis=0) if dark.any() else np.array([24, 24, 24])
-    image[(support == 0) & (gray > 120)] = background.astype(np.uint8)
-    return Image.fromarray(image)

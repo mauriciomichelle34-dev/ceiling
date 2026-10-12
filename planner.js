@@ -289,7 +289,7 @@ function showPhoto(photo) {
   $('photoSelect').hidden = photos.length < 2; $('photoSelectLabel').hidden = photos.length < 2;
   $('filename').textContent = photo.meta.name;
   $('imageInfo').textContent = `${photo.meta.width} × ${photo.meta.height} px · 已识别菌丝区域`;
-  $('scopeInfo').textContent = '识别范围：自动定位的培养皿内缘。白色虚线之外不计入面积、取样或标注导出。';
+  $('scopeInfo').textContent = '完整原图保持不变。白色虚线自动圈出培养皿内缘，菌丝结果只显示在边界内。';
   $('empty').hidden = true; $('canvas').hidden = false; $('actions').hidden = true;
   $('pickHint').textContent = '青色圆是标定参考，请确认与培养皿匹配。';
   renderTable(); controls(); draw();
@@ -499,7 +499,7 @@ $('previewActions').addEventListener('click', async () => {
 async function health() {
   try {
     const response = await fetch('/api/health'); if (!response.ok) throw Error(); const data = await response.json();
-    if (!data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
+    if (!data.original_image_inference || !data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
     $('statusDot').classList.toggle('ready', ready);
     if (data.shared) $('privacy').textContent = '无密码临时共享：照片经 Cloudflare 转到服务提供者电脑处理并保存。';
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }

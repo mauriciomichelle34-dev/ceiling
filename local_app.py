@@ -18,7 +18,7 @@ import torch
 from PIL import Image, UnidentifiedImageError
 
 from model import UNet
-from dish import detect_dish, restrict_to_dish, prepare_model_image, DishNotFound
+from dish import detect_dish, restrict_to_dish, DishNotFound
 from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
 from device_interface import PreviewDevice
 
@@ -79,8 +79,7 @@ class Predictor:
             source = im.convert('RGB')
         w, h = source.size
         boundary, dish_suggestion = detect_dish(source)
-        model_image = prepare_model_image(source, boundary)
-        small = model_image.resize((self.config['width'], self.config['height']), Image.Resampling.BILINEAR)
+        small = source.resize((self.config['width'], self.config['height']), Image.Resampling.BILINEAR)
         array = np.asarray(small, dtype=np.float32)/255
         tensor = torch.from_numpy(array.transpose(2, 0, 1).copy())[None].to(self.device)
         with torch.inference_mode():
@@ -158,7 +157,8 @@ class Handler(BaseHTTPRequestHandler):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
-            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 8,
+            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 9,
+                                    'original_image_inference': True,
                                     'dish_interior_only': True,
                                     'area_measurement': True, 'region_animation': True,
                                     'model': self.server.predictor.model_name,
@@ -329,7 +329,7 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != 8 or running.get('model_sha256') != requested_hash:
+                if running.get('version') != 9 or running.get('model_sha256') != requested_hash:
                     raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:
