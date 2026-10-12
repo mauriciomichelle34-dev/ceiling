@@ -277,6 +277,11 @@ def make_plan(mask, calibration, diameter_mm, gap_mm, default_depth_mm):
     if mask.ndim != 2:
         raise ValueError('标注图必须为单通道。')
     calibration = validate_calibration(calibration, mask.shape[1], mask.shape[0])
+    y, x = np.ogrid[:mask.shape[0], :mask.shape[1]]
+    inside = ((x-calibration['center_x_px'])**2 + (y-calibration['center_y_px'])**2
+              <= (calibration['dish_diameter_px']/2)**2)
+    # Match area measurement, ordering and coverage to the same usable mask.
+    mask = ((mask > 0) & inside).astype(np.uint8)
     diameter = number(diameter_mm, '取样口径', positive=True)
     gap = number(gap_mm, '圆边缘间隙')
     depth = number(default_depth_mm, '默认取样深度', maximum=1000)

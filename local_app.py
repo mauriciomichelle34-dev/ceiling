@@ -18,6 +18,7 @@ import torch
 from PIL import Image, UnidentifiedImageError
 
 from model import UNet
+from dish import detect_dish, restrict_to_dish, prepare_model_image, DishNotFound
 from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
 from device_interface import PreviewDevice
 
@@ -27,34 +28,16 @@ MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
 
-def suggest_dish(source):
-    """Image-only circle suggestion; real millimeters still need a known size."""
-    width, height = source.size
-    preview = source.copy()
-    preview.thumbnail((800, 800), Image.Resampling.BILINEAR)
-    small = np.asarray(preview)
-    scale = width/preview.width
-    gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-    gray = cv2.GaussianBlur(gray, (7, 7), 1.5)
-    shortest = min(preview.size)
-    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.2,
-        minDist=shortest/3, param1=90, param2=45,
-        minRadius=int(shortest*.28), maxRadius=int(shortest*.495))
-    if circles is not None:
-        candidates = [c for c in circles[0] if c[0]-c[2]>=0 and c[1]-c[2]>=0
-                      and c[0]+c[2]<preview.width and c[1]+c[2]<preview.height]
-        if candidates:
-            x, y, radius = min(candidates, key=lambda c: ((c[0]-preview.width/2)**2
-                                  +(c[1]-preview.height/2)**2)/shortest**2-c[2]/shortest*.1)
-            return {'center_x_px': float(x*scale), 'center_y_px': float(y*scale),
-                    'dish_diameter_px': float(radius*2*scale), 'source': 'image_circle_suggestion'}
-    return {'center_x_px': (width-1)/2, 'center_y_px': (height-1)/2,
-            'dish_diameter_px': min(width, height)*.85, 'source': 'estimate_requires_review'}
-
-
-def save_region_previews(mask, preview_size, folder):
+def save_region_previews(mask, preview_size, folder, boundary=None):
     """Save transparent animation layers without changing the original mask."""
     selection = cv2.resize(mask, preview_size, interpolation=cv2.INTER_NEAREST) > 0
+    inside = None
+    if boundary:
+        height, width = mask.shape
+        y, x = np.ogrid[:preview_size[1], :preview_size[0]]
+        inside = ((x*width/preview_size[0]-boundary['center_x_px'])**2
+                  + (y*height/preview_size[1]-boundary['center_y_px'])**2 <= boundary['radius_px']**2)
+        selection &= inside
     region = np.zeros((*selection.shape, 4), dtype=np.uint8)
     region[..., :3] = (0, 255, 100)
     region[..., 3] = selection.astype(np.uint8)*255
@@ -62,6 +45,8 @@ def save_region_previews(mask, preview_size, folder):
     edge = cv2.morphologyEx(selection.astype(np.uint8), cv2.MORPH_GRADIENT,
                             np.ones((3, 3), dtype=np.uint8),
                             borderType=cv2.BORDER_CONSTANT, borderValue=0)
+    if inside is not None:
+        edge[~inside] = 0
     outline = np.full((*selection.shape, 4), 255, dtype=np.uint8)
     outline[..., 3] = edge*255
     Image.fromarray(outline).save(folder/'region_outline.png')
@@ -93,7 +78,9 @@ class Predictor:
                 raise ValueError('图片过大，请使用不超过 2500 万像素的图片。')
             source = im.convert('RGB')
         w, h = source.size
-        small = source.resize((self.config['width'], self.config['height']), Image.Resampling.BILINEAR)
+        boundary, dish_suggestion = detect_dish(source)
+        model_image = prepare_model_image(source, boundary)
+        small = model_image.resize((self.config['width'], self.config['height']), Image.Resampling.BILINEAR)
         array = np.asarray(small, dtype=np.float32)/255
         tensor = torch.from_numpy(array.transpose(2, 0, 1).copy())[None].to(self.device)
         with torch.inference_mode():
@@ -102,6 +89,7 @@ class Predictor:
             raise RuntimeError('模型计算异常，请重试。')
         mask = (cv2.resize(probability, (w, h), interpolation=cv2.INTER_LINEAR)
                 >= self.config['threshold']).astype(np.uint8)
+        mask = restrict_to_dish(mask, boundary)
         identifier = uuid.uuid4().hex
         folder = self.result_root/identifier
         folder.mkdir(parents=True, exist_ok=False)
@@ -109,7 +97,7 @@ class Predictor:
         preview = source.copy()
         preview.thumbnail((1400, 1050), Image.Resampling.LANCZOS)
         preview.save(folder/'original.jpg', quality=92)
-        selection, region_bounds = save_region_previews(mask, preview.size, folder)
+        selection, region_bounds = save_region_previews(mask, preview.size, folder, boundary)
         overlay = np.asarray(preview).copy()
         overlay[selection] = (.55*overlay[selection]+.45*np.array([0, 255, 100])).astype(np.uint8)
         Image.fromarray(overlay).save(folder/'overlay.jpg', quality=92)
@@ -121,7 +109,7 @@ class Predictor:
                 'region': f'/results/{identifier}/region.png',
                 'region_outline': f'/results/{identifier}/region_outline.png',
                 'region_bounds': region_bounds,
-                'dish_suggestion': suggest_dish(source)}
+                'dish_boundary': boundary, 'dish_suggestion': dish_suggestion}
         (folder/'metadata.json').write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
         return meta
 
@@ -170,7 +158,8 @@ class Handler(BaseHTTPRequestHandler):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
-            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 7,
+            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 8,
+                                    'dish_interior_only': True,
                                     'area_measurement': True, 'region_animation': True,
                                     'model': self.server.predictor.model_name,
                                     'model_sha256': self.server.predictor.model_sha256,
@@ -181,6 +170,9 @@ class Handler(BaseHTTPRequestHandler):
         plan_match = re.fullmatch(r'/results/([0-9a-f]{32})/plans/([0-9a-f]{32})/(plan\.json|points\.csv|preview\.json|layout\.svg)', path)
         if plan_match:
             folder = self.server.predictor.result_root/plan_match[1]
+            meta_path = folder/'metadata.json'
+            if meta_path.is_file() and not json.loads(meta_path.read_text(encoding='utf-8')).get('dish_boundary'):
+                return self.reply(409, {'error': '旧识别结果未限定皿内范围，请重新上传照片。'})
             plan_path = folder/'plans'/plan_match[2]/'plan.json'
             if not plan_path.is_file():
                 return self.reply(404, {'error': '未找到取样方案。'})
@@ -199,9 +191,11 @@ class Handler(BaseHTTPRequestHandler):
             folder = self.server.predictor.result_root/match[1]
             target = folder/match[2]
             if target.is_file():
+                meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+                if match[2] != 'original.jpg' and not meta.get('dish_boundary'):
+                    return self.reply(409, {'error': '旧识别结果未限定皿内范围，请重新上传照片。'})
                 download = None
                 if match[2] == 'mask.png':
-                    meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
                     download = Path(meta['name']).stem+'.png'
                 return self.reply(200, target.read_bytes(), 'image/png' if match[2].endswith('.png') else 'image/jpeg', download)
         self.reply(404, {'error': '未找到文件。'})
@@ -221,6 +215,8 @@ class Handler(BaseHTTPRequestHandler):
             folder = self.server.predictor.result_root/prediction_id
             if not (folder/'metadata.json').is_file():
                 return self.reply(404, {'error': '图片不存在，请重新上传。'})
+            if not json.loads((folder/'metadata.json').read_text(encoding='utf-8')).get('dish_boundary'):
+                return self.reply(409, {'error': '旧识别结果未限定皿内范围，请重新上传照片。'})
             if not self.server.predictor.slots.acquire(blocking=False):
                 return self.reply(429, {'error': '排队人数已满，请稍后重试。'})
             acquired = False
@@ -302,6 +298,8 @@ class Handler(BaseHTTPRequestHandler):
         except socket.timeout:
             self.close_connection = True
             self.reply(408, {'error': '上传超时，请检查网络后重试。'})
+        except DishNotFound as exc:
+            self.reply(422, {'error': str(exc)})
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
             self.reply(400, {'error': '无法读取图片。请使用 40 MB、2500 万像素以内的有效 JPG 或 PNG。'})
         except Exception as exc:
@@ -331,7 +329,7 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != 7 or running.get('model_sha256') != requested_hash:
+                if running.get('version') != 8 or running.get('model_sha256') != requested_hash:
                     raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:

@@ -94,7 +94,7 @@ function showArea(data) {
   $('areaPanel').setAttribute('aria-busy', 'false');
   $('myceliumArea').textContent = data.mycelium_area_mm2.toLocaleString('zh-CN', {minimumFractionDigits: 2, maximumFractionDigits: 2});
   $('dishCoverage').textContent = data.dish_coverage_percent.toFixed(2);
-  $('areaInfo').textContent = `培养皿总面积 ${data.dish_area_mm2.toLocaleString('zh-CN', {maximumFractionDigits: 2})} mm² · 按标定圆内识别出的菌丝区域估算。`;
+  $('areaInfo').textContent = `培养皿总面积 ${data.dish_area_mm2.toLocaleString('zh-CN', {maximumFractionDigits: 2})} mm² · 仅计入自动内边界与标定圆内的菌丝。`;
 }
 function updateArea() {
   let c;
@@ -280,7 +280,7 @@ async function upload(files) {
   }
   busy = false; uploading = false; $('files').value = ''; controls(); draw();
   if (errors.length) notice(errors.join('；'), true);
-  else notice(current.profileUsed ? '已复用固定拍摄标定。检查青色圆与培养皿匹配后，生成排布。' : '菌丝识别完成。请填写实际直径，并检查青色圆是否与培养皿匹配。');
+  else notice(current.profileUsed ? '已自动排除皿外区域并复用尺寸标定。检查白色内边界与青色标定圆后，生成排布。' : '已自动定位培养皿内边缘，皿外区域已排除。请填写实际直径，并检查白色内边界与青色标定圆。');
 }
 function showPhoto(photo) {
   current = photo; picking = null; selected = null;
@@ -289,6 +289,7 @@ function showPhoto(photo) {
   $('photoSelect').hidden = photos.length < 2; $('photoSelectLabel').hidden = photos.length < 2;
   $('filename').textContent = photo.meta.name;
   $('imageInfo').textContent = `${photo.meta.width} × ${photo.meta.height} px · 已识别菌丝区域`;
+  $('scopeInfo').textContent = '识别范围：自动定位的培养皿内缘。白色虚线之外不计入面积、取样或标注导出。';
   $('empty').hidden = true; $('canvas').hidden = false; $('actions').hidden = true;
   $('pickHint').textContent = '青色圆是标定参考，请确认与培养皿匹配。';
   renderTable(); controls(); draw();
@@ -338,6 +339,10 @@ function drawRegion(ctx, m, unit) {
   const c = animation ? animation.c : current.area.data.calibration;
   ctx.save();
   ctx.beginPath(); ctx.arc(c.center_x_px, c.center_y_px, c.dish_diameter_px/2, 0, Math.PI*2); ctx.clip();
+  const boundary = current.meta.dish_boundary;
+  if (boundary) {
+    ctx.beginPath(); ctx.arc(boundary.center_x_px, boundary.center_y_px, boundary.radius_px, 0, Math.PI*2); ctx.clip();
+  }
   const progress = animation?.progress ?? 1;
   const bounds = current.meta.region_bounds || [0, 0, m.width, m.height];
   const left = Math.max(bounds[0], c.center_x_px-c.dish_diameter_px/2);
@@ -379,6 +384,11 @@ function draw() {
   ctx.save(); ctx.scale(canvas.width / m.width, canvas.height / m.height);
   const unit = m.width / canvas.width, cx = Number($('centerX').value), cy = Number($('centerY').value), d = Number($('dishPx').value);
   drawRegion(ctx, m, unit);
+  const boundary = m.dish_boundary;
+  if (boundary) {
+    ctx.strokeStyle = '#edf5f0'; ctx.lineWidth = 1.3*unit; ctx.setLineDash([4*unit, 5*unit]);
+    ctx.beginPath(); ctx.arc(boundary.center_x_px, boundary.center_y_px, boundary.radius_px, 0, Math.PI*2); ctx.stroke(); ctx.setLineDash([]);
+  }
   if (Number.isFinite(cx) && Number.isFinite(cy) && d > 0) {
     ctx.strokeStyle = '#63d2d8'; ctx.lineWidth = 1.5 * unit; ctx.setLineDash([8 * unit, 5 * unit]);
     ctx.beginPath(); ctx.arc(cx, cy, d / 2, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
@@ -489,7 +499,7 @@ $('previewActions').addEventListener('click', async () => {
 async function health() {
   try {
     const response = await fetch('/api/health'); if (!response.ok) throw Error(); const data = await response.json();
-    if (!data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
+    if (!data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
     $('statusDot').classList.toggle('ready', ready);
     if (data.shared) $('privacy').textContent = '无密码临时共享：照片经 Cloudflare 转到服务提供者电脑处理并保存。';
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }
