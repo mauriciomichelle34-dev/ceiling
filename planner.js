@@ -7,19 +7,10 @@ const geometryFields = ['center_x_px', 'center_y_px', 'dish_diameter_px', 'dish_
 const calibrationInputs = ['centerX', 'centerY', 'dishPx', 'dishMm'];
 const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload', 'deviceDownload'];
 const cultureKey = 'mycelium-batch-culture-v1';
-const cultureInputs = ['speciesName', 'cultureStartedAt', 'cultureTemperature', 'cultureHumidity', 'cultureEnvironmentSource'];
-const defaultCulture = {speciesName: '', cultureStartedAt: '', cultureTemperature: '25', cultureHumidity: '75', cultureEnvironmentSource: 'example'};
+const cultureInputs = ['speciesName', 'cultureStartedAt'];
+const defaultCulture = {speciesName: '', cultureStartedAt: ''};
 let cultureStorageAvailable = true;
 
-function cultureMeasurement(id, minimum, maximum, unit) {
-  const raw = $(id).value.trim(), number = Number(raw);
-  if ($(id).validity?.badInput) return {text: '请检查参数', valid: false};
-  if (raw === '') return {text: '未填写', valid: true};
-  if (!Number.isFinite(number) || number < minimum || number > maximum) {
-    return {text: '请检查参数', valid: false};
-  }
-  return {text: `${number.toLocaleString('zh-CN', {maximumFractionDigits: 1})}${unit}`, valid: true};
-}
 function cultureStartText(raw) {
   if (!raw) return {text: '未填写', valid: true};
   const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(raw);
@@ -32,21 +23,13 @@ function cultureStartText(raw) {
 function renderBatchCulture() {
   $('cultureSpeciesValue').textContent = $('speciesName').value.trim() || '菌丝种类未填写';
   const start = cultureStartText($('cultureStartedAt').value);
-  const temperature = cultureMeasurement('cultureTemperature', -50, 100, ' ℃');
-  const humidity = cultureMeasurement('cultureHumidity', 0, 100, '% RH');
-  for (const [id, result] of [['cultureStartValue', start], ['cultureTemperatureValue', temperature], ['cultureHumidityValue', humidity]]) {
-    $(id).textContent = result.text; $(id).classList.toggle('invalid', !result.valid);
-  }
-  for (const [id, result] of [['cultureStartedAt', start], ['cultureTemperature', temperature], ['cultureHumidity', humidity]]) {
-    $(id).setAttribute('aria-invalid', String(!result.valid));
-  }
-  const example = $('cultureEnvironmentSource').value !== 'manual';
-  $('cultureSourceBadge').textContent = example ? '示例温湿度' : '手动温湿度';
-  $('cultureSourceBadge').classList.toggle('manual', !example);
-  $('cultureHelper').textContent = !start.valid || !temperature.valid || !humidity.valid
-    ? '请检查开始时间、温度（−50 至 100 ℃）和湿度（0 至 100% RH）。'
+  $('cultureStartValue').textContent = start.text;
+  $('cultureStartValue').classList.toggle('invalid', !start.valid);
+  $('cultureStartedAt').setAttribute('aria-invalid', String(!start.valid));
+  $('cultureHelper').textContent = !start.valid
+    ? '请检查培养开始时间。'
     : cultureStorageAvailable
-      ? `本批所有照片共用，资料已保存在当前浏览器。${example ? '示例温湿度不代表实测值。' : '温湿度由你手动填写。'}`
+      ? '本批所有照片共用，资料已保存在当前浏览器。'
       : '当前浏览器无法保存资料，刷新后需要重新填写。';
 }
 function saveBatchCulture() {
@@ -60,10 +43,10 @@ function initializeBatchCulture() {
   try {
     const data = JSON.parse(localStorage.getItem(cultureKey));
     if (data && typeof data === 'object' && !Array.isArray(data)) stored = data;
-  } catch { /* Ignore an invalid saved record and use blank/example values. */ }
+  } catch { /* Ignore an invalid saved record and use blank values. */ }
   for (const id of cultureInputs) {
     const value = typeof stored[id] === 'string' ? stored[id] : defaultCulture[id];
-    $(id).value = id === 'speciesName' ? value.slice(0, 80) : id === 'cultureEnvironmentSource' ? (value === 'manual' ? 'manual' : 'example') : value;
+    $(id).value = id === 'speciesName' ? value.slice(0, 80) : value;
     $(id).addEventListener('input', saveBatchCulture);
     $(id).addEventListener('change', saveBatchCulture);
   }

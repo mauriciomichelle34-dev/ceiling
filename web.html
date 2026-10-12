@@ -27,9 +27,7 @@
       <input id="speciesName" type="text" maxlength="80" placeholder="填写菌种或品种名称">
       <label for="cultureStartedAt">培养开始时间 <span>本地时间</span></label>
       <input id="cultureStartedAt" type="datetime-local" step="60">
-      <div class="pair"><div><label for="cultureTemperature">培养温度 <span>℃</span></label><input id="cultureTemperature" type="number" min="-50" max="100" step="0.1" value="25"></div><div><label for="cultureHumidity">相对湿度 <span>% RH</span></label><input id="cultureHumidity" type="number" min="0" max="100" step="0.1" value="75"></div></div>
-      <label for="cultureEnvironmentSource">温湿度来源</label><select id="cultureEnvironmentSource"><option value="example">示例参数</option><option value="manual">手动填写</option></select>
-      <p class="muted" id="cultureHelper">本批所有照片共用，修改后同步到右侧。示例温湿度不代表实测值。</p>
+      <p class="muted" id="cultureHelper">本批所有照片共用，修改后同步到右侧。</p>
       <button id="resetCulture" class="secondary wide" type="button">重置培养资料</button>
     </section>
     <section class="panel">
@@ -62,9 +60,9 @@
     <div class="title-row"><div><div class="eyebrow">IMAGE → REGION → SAMPLING POINTS</div><h1>从菌丝区域到取样位置</h1></div><span class="session-label">规划模式</span></div>
     <div id="notice" class="notice" role="status" aria-live="polite">上传照片，确认标定，再生成取样排布。</div>
     <section class="summary-panel" aria-label="培养与识别数据总览">
+      <div class="summary-heading"><h2>培养资料与识别结果</h2><span class="tag saved">本批共用</span></div>
       <section class="culture-overview" aria-label="本批培养资料">
-        <div class="culture-head"><div><span class="culture-label">培养与识别数据总览 · 本批培养资料</span><h2 id="cultureSpeciesValue">菌丝种类未填写</h2></div><span id="cultureSourceBadge" class="culture-source">示例温湿度</span></div>
-        <dl class="culture-grid"><div><dt>培养开始时间 · 本地时间</dt><dd id="cultureStartValue">未填写</dd></div><div><dt>培养温度</dt><dd id="cultureTemperatureValue">25 ℃</dd></div><div><dt>空气相对湿度</dt><dd id="cultureHumidityValue">75% RH</dd></div></dl>
+        <dl class="culture-grid"><div><dt>菌丝种类名称</dt><dd id="cultureSpeciesValue">菌丝种类未填写</dd></div><div><dt>培养开始时间 · 本地时间</dt><dd id="cultureStartValue">未填写</dd></div></dl>
       </section>
       <div class="summary-results">
         <section id="areaPanel" class="area-panel" data-phase="waiting" aria-busy="false" aria-label="菌丝体面积测算">
