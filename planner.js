@@ -6,6 +6,73 @@ const profileKey = 'mycelium-fixed-calibration-v1';
 const geometryFields = ['center_x_px', 'center_y_px', 'dish_diameter_px', 'dish_diameter_mm'];
 const calibrationInputs = ['centerX', 'centerY', 'dishPx', 'dishMm'];
 const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload', 'deviceDownload'];
+const cultureKey = 'mycelium-batch-culture-v1';
+const cultureInputs = ['speciesName', 'cultureStartedAt', 'cultureTemperature', 'cultureHumidity', 'cultureEnvironmentSource'];
+const defaultCulture = {speciesName: '', cultureStartedAt: '', cultureTemperature: '25', cultureHumidity: '75', cultureEnvironmentSource: 'example'};
+let cultureStorageAvailable = true;
+
+function cultureMeasurement(id, minimum, maximum, unit) {
+  const raw = $(id).value.trim(), number = Number(raw);
+  if ($(id).validity?.badInput) return {text: '请检查参数', valid: false};
+  if (raw === '') return {text: '未填写', valid: true};
+  if (!Number.isFinite(number) || number < minimum || number > maximum) {
+    return {text: '请检查参数', valid: false};
+  }
+  return {text: `${number.toLocaleString('zh-CN', {maximumFractionDigits: 1})}${unit}`, valid: true};
+}
+function cultureStartText(raw) {
+  if (!raw) return {text: '未填写', valid: true};
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/.exec(raw);
+  const date = new Date(raw);
+  if (!parts || !Number.isFinite(date.getTime()) || [date.getFullYear(), date.getMonth()+1, date.getDate(), date.getHours(), date.getMinutes()].some((v, i) => v !== Number(parts[i+1]))) {
+    return {text: '请检查日期', valid: false};
+  }
+  return {text: `${parts[1]}-${parts[2]}-${parts[3]} ${parts[4]}:${parts[5]}`, valid: true};
+}
+function renderBatchCulture() {
+  $('cultureSpeciesValue').textContent = $('speciesName').value.trim() || '菌丝种类未填写';
+  const start = cultureStartText($('cultureStartedAt').value);
+  const temperature = cultureMeasurement('cultureTemperature', -50, 100, ' ℃');
+  const humidity = cultureMeasurement('cultureHumidity', 0, 100, '% RH');
+  for (const [id, result] of [['cultureStartValue', start], ['cultureTemperatureValue', temperature], ['cultureHumidityValue', humidity]]) {
+    $(id).textContent = result.text; $(id).classList.toggle('invalid', !result.valid);
+  }
+  for (const [id, result] of [['cultureStartedAt', start], ['cultureTemperature', temperature], ['cultureHumidity', humidity]]) {
+    $(id).setAttribute('aria-invalid', String(!result.valid));
+  }
+  const example = $('cultureEnvironmentSource').value !== 'manual';
+  $('cultureSourceBadge').textContent = example ? '示例温湿度' : '手动温湿度';
+  $('cultureSourceBadge').classList.toggle('manual', !example);
+  $('cultureHelper').textContent = !start.valid || !temperature.valid || !humidity.valid
+    ? '请检查开始时间、温度（−50 至 100 ℃）和湿度（0 至 100% RH）。'
+    : cultureStorageAvailable
+      ? `本批所有照片共用，资料已保存在当前浏览器。${example ? '示例温湿度不代表实测值。' : '温湿度由你手动填写。'}`
+      : '当前浏览器无法保存资料，刷新后需要重新填写。';
+}
+function saveBatchCulture() {
+  const values = Object.fromEntries(cultureInputs.map(id => [id, $(id).value]));
+  try { localStorage.setItem(cultureKey, JSON.stringify(values)); cultureStorageAvailable = true; }
+  catch { cultureStorageAvailable = false; }
+  renderBatchCulture();
+}
+function initializeBatchCulture() {
+  let stored = {};
+  try {
+    const data = JSON.parse(localStorage.getItem(cultureKey));
+    if (data && typeof data === 'object' && !Array.isArray(data)) stored = data;
+  } catch { /* Ignore an invalid saved record and use blank/example values. */ }
+  for (const id of cultureInputs) {
+    const value = typeof stored[id] === 'string' ? stored[id] : defaultCulture[id];
+    $(id).value = id === 'speciesName' ? value.slice(0, 80) : id === 'cultureEnvironmentSource' ? (value === 'manual' ? 'manual' : 'example') : value;
+    $(id).addEventListener('input', saveBatchCulture);
+    $(id).addEventListener('change', saveBatchCulture);
+  }
+  $('resetCulture').addEventListener('click', () => {
+    for (const id of cultureInputs) $(id).value = defaultCulture[id];
+    saveBatchCulture();
+  });
+  saveBatchCulture();
+}
 let areaKey = '', areaTimer = null, areaSequence = 0;
 const RECOGNITION_MS = 800;
 const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -445,4 +512,5 @@ async function health() {
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }
   controls();
 }
+initializeBatchCulture();
 health();
