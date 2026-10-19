@@ -12,11 +12,13 @@ venv/
 /models/
 /predictions/
 /predictions_shared/
+/results/
 /sharing/
 /tools/
 /work/
 *.pt
 !/mycelium_v2.pt
+!/mycelium_v3.pt
 *.pth
 *.onnx
 *.log

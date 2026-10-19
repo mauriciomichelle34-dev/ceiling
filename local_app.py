@@ -18,12 +18,14 @@ import torch
 from PIL import Image, UnidentifiedImageError
 
 from model import UNet
+from inference import predict_probability
 from dish import detect_dish, restrict_to_dish, DishNotFound
 from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
 from device_interface import PreviewDevice
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_MODEL = HERE/'mycelium_v2.pt'
+DEFAULT_MODEL = HERE/'mycelium_v3.pt'
+APP_VERSION = 10
 MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
@@ -79,15 +81,8 @@ class Predictor:
             source = im.convert('RGB')
         w, h = source.size
         boundary, dish_suggestion = detect_dish(source)
-        small = source.resize((self.config['width'], self.config['height']), Image.Resampling.BILINEAR)
-        array = np.asarray(small, dtype=np.float32)/255
-        tensor = torch.from_numpy(array.transpose(2, 0, 1).copy())[None].to(self.device)
-        with torch.inference_mode():
-            probability = self.network(tensor).sigmoid()[0, 0].cpu().numpy()
-        if not np.isfinite(probability).all():
-            raise RuntimeError('模型计算异常，请重试。')
-        mask = (cv2.resize(probability, (w, h), interpolation=cv2.INTER_LINEAR)
-                >= self.config['threshold']).astype(np.uint8)
+        probability = predict_probability(self.network, source, self.config, self.device)
+        mask = (probability >= self.config['threshold']).astype(np.uint8)
         mask = restrict_to_dish(mask, boundary)
         identifier = uuid.uuid4().hex
         folder = self.result_root/identifier
@@ -157,12 +152,14 @@ class Handler(BaseHTTPRequestHandler):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
-            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': 9,
+            return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': APP_VERSION,
                                     'original_image_inference': True,
                                     'dish_interior_only': True,
                                     'area_measurement': True, 'region_animation': True,
                                     'model': self.server.predictor.model_name,
                                     'model_sha256': self.server.predictor.model_sha256,
+                                    'model_preprocessing': self.server.predictor.config.get('preprocessing', 'legacy_stretch_rgb_0_1'),
+                                    'model_input_size': [self.server.predictor.config['width'], self.server.predictor.config['height']],
                                     'sampling_order': 'outer_boundary_layers',
                                     'sampling_planner': True, 'hardware_ready': False,
                                     'shared': bool(getattr(self.server, 'public_origin_file', None)),
@@ -329,7 +326,7 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != 9 or running.get('model_sha256') != requested_hash:
+                if running.get('version') != APP_VERSION or running.get('model_sha256') != requested_hash:
                     raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:
