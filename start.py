@@ -14,7 +14,8 @@ HERE = Path(__file__).resolve().parent
 VENV = HERE / '.venv'
 VENV_PYTHON = VENV / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
 DEPENDENCIES = [('torch', 'torch', (2, 6), (3,)), ('numpy', 'numpy', (2,), (3,)),
-                ('opencv-python', 'cv2', (4, 10), (6,)), ('Pillow', 'PIL', (10,), (13,))]
+                ('opencv-python', 'cv2', (4, 10), (6,)), ('Pillow', 'PIL', (10,), (13,)),
+                ('python-snap7', 's7', (3, 3, 0), (3, 3, 1))]
 
 
 def dependencies_ready():
@@ -48,12 +49,17 @@ def main():
         else:
             if not VENV_PYTHON.is_file():
                 print('Creating local .venv...', flush=True)
-                venv.EnvBuilder(with_pip=True).create(VENV)
+                venv.EnvBuilder(with_pip=True, system_site_packages=True).create(VENV)
             target_python = VENV_PYTHON
         check = subprocess.run([str(target_python), str(HERE/'start.py'), '--check'], cwd=HERE)
         if check.returncode:
             print('First run: downloading dependencies. This can take several minutes.', flush=True)
-            subprocess.run([str(target_python), '-m', 'pip', 'install', 'torch>=2.6,<3', '--index-url', 'https://download.pytorch.org/whl/cpu'], check=True, cwd=HERE)
+            torch_check = subprocess.run([str(target_python), '-c',
+                'import torch, importlib.metadata as m; '
+                'v=tuple(int(x) for x in m.version("torch").split("+")[0].split(".")[:2]); '
+                'assert (2,6) <= v < (3,)'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if torch_check.returncode:
+                subprocess.run([str(target_python), '-m', 'pip', 'install', 'torch>=2.6,<3', '--index-url', 'https://download.pytorch.org/whl/cpu'], check=True, cwd=HERE)
             subprocess.run([str(target_python), '-m', 'pip', 'install', '-r', str(HERE/'requirements.txt')], check=True, cwd=HERE)
         if args.setup_only:
             print('Setup complete.', flush=True)

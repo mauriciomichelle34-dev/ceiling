@@ -189,20 +189,21 @@ function link(id, href, enabled = true) {
   if (enabled && href) el.href = href; else el.removeAttribute('href');
 }
 function controls() {
+  const automaticLock = typeof automaticLocksPLC === 'function' && automaticLocksPLC();
   const has = Boolean(current), plan = current?.plan, geometric = geometryDirty(), depths = depthDirty();
   let validCalibration = false;
   try { calibration(); validCalibration = true; } catch {}
   $('files').disabled = busy || !ready;
   $('photoSelect').disabled = busy;
-  for (const id of ['pickCenter', 'pickEdge']) $(id).disabled = !has || busy;
-  $('saveCalibration').disabled = !validCalibration || busy;
-  $('generate').disabled = !has || !ready || busy || !validCalibration;
+  for (const id of ['pickCenter', 'pickEdge']) $(id).disabled = !has || busy || automaticLock;
+  $('saveCalibration').disabled = !validCalibration || busy || automaticLock;
+  $('generate').disabled = !has || !ready || busy || !validCalibration || automaticLock;
   $('generate').textContent = busy ? '正在处理…' : plan ? '重新生成取样排布' : '生成取样排布';
-  $('saveDepths').disabled = !plan || !depths || geometric || busy;
-  $('applyDepth').disabled = !plan || geometric || busy;
+  $('saveDepths').disabled = !plan || !depths || geometric || busy || automaticLock;
+  $('applyDepth').disabled = !plan || geometric || busy || automaticLock;
   $('previewActions').disabled = !plan || geometric || depths || busy;
-  for (const id of [...calibrationInputs, 'diameter', 'gap', 'defaultZ']) $(id).disabled = busy;
-  for (const el of $('pointRows').querySelectorAll('input,button')) el.disabled = busy;
+  for (const id of [...calibrationInputs, 'diameter', 'gap', 'defaultZ']) $(id).disabled = busy || automaticLock;
+  for (const el of $('pointRows').querySelectorAll('input,button')) el.disabled = busy || automaticLock;
   if (plan) {
     $('pointCount').textContent = plan.count;
     $('coverage').textContent = (plan.coverage_fraction * 100).toFixed(1);
@@ -220,6 +221,9 @@ function controls() {
   if (geometric || depths) $('actions').hidden = true;
   updateScale();
   updateArea();
+  if (typeof updateAutomaticControls === 'function') updateAutomaticControls();
+  if (typeof updatePLCControls === 'function') updatePLCControls();
+  if (typeof updateCameraControls === 'function') updateCameraControls();
 }
 function updateScale() {
   try {
@@ -253,7 +257,21 @@ function getProfile(meta) {
     return p && p.image_width === meta.width && p.image_height === meta.height ? p : null;
   } catch { return null; }
 }
+async function addRecognizedPhoto(meta) {
+  const [original, region, regionOutline] = await Promise.all([
+    loadImage(meta.original),loadImage(meta.region),loadImage(meta.region_outline)]);
+  const profile = getProfile(meta), c = profile || meta.dish_suggestion;
+  const photo = {meta, original, region, regionOutline, glowCanvas:document.createElement('canvas'),
+    plan:null, overrides:{}, profileUsed:Boolean(profile),
+    fields:{centerX:String(c.center_x_px), centerY:String(c.center_y_px), dishPx:String(c.dish_diameter_px),
+      dishMm:profile ? String(c.dish_diameter_mm) : '', diameter:$('diameter').value,
+      gap:$('gap').value, defaultZ:$('defaultZ').value}};
+  photos.push(photo);
+  const option=document.createElement('option'); option.value=String(photos.length-1); option.textContent=meta.name;
+  $('photoSelect').append(option); showPhoto(photo);
+}
 async function upload(files) {
+  if (typeof automaticEnabled !== 'undefined' && automaticEnabled) return uploadAutomatic(files);
   if (busy || !ready || !files.length) return;
   capture(); busy = true; uploading = true; picking = null; controls(); draw();
   const errors = [];
@@ -263,19 +281,7 @@ async function upload(files) {
       if (file.size > 40 * 1024 * 1024) throw Error('单张图片不能超过 40 MB。');
       if (!/\.(jpe?g|png)$/i.test(file.name)) throw Error('请选择 JPG 或 PNG 图片。');
       const meta = await request('/api/predict', file, true, file.name);
-      const [original, region, regionOutline] = await Promise.all([
-        loadImage(meta.original), loadImage(meta.region), loadImage(meta.region_outline)
-      ]);
-      const profile = getProfile(meta), c = profile || meta.dish_suggestion;
-      const photo = {
-        meta, original, region, regionOutline, glowCanvas: document.createElement('canvas'),
-        plan: null, overrides: {}, profileUsed: Boolean(profile),
-        fields: {centerX: String(c.center_x_px), centerY: String(c.center_y_px), dishPx: String(c.dish_diameter_px),
-          dishMm: profile ? String(c.dish_diameter_mm) : '', diameter: $('diameter').value, gap: $('gap').value, defaultZ: $('defaultZ').value}
-      };
-      photos.push(photo);
-      const option = document.createElement('option'); option.value = String(photos.length - 1); option.textContent = meta.name; $('photoSelect').append(option);
-      showPhoto(photo);
+      await addRecognizedPhoto(meta);
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
   busy = false; uploading = false; $('files').value = ''; controls(); draw();
@@ -493,7 +499,7 @@ $('previewActions').addEventListener('click', async () => {
   try {
     const response = await fetch(planUrl('preview.json')); if (!response.ok) throw Error('指令预览读取失败。');
     const data = await response.json(); $('actions').textContent = JSON.stringify(data, null, 2); $('actions').hidden = false;
-    notice('这里只显示取样位置与深度指令，尚未连接设备。');
+    notice('这里显示取样位置与深度指令。发送 X、Y 到 PLC，请使用上方“发送当前坐标到 PLC”按钮。');
   } catch (error) { notice(error.message, true); }
 });
 async function health() {

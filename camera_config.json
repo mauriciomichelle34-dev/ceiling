@@ -1,0 +1,5 @@
+{
+  "sdk_python_dir": "E:/haikangMVS/MVS/Development/Samples/Python/MvImport",
+  "runtime_dir": "C:/Program Files (x86)/Common Files/MVS/Runtime/Win64_x64",
+  "capture_timeout_ms": 10000
+}

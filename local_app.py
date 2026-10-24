@@ -22,10 +22,16 @@ from inference import predict_probability
 from dish import detect_dish, restrict_to_dish, DishNotFound
 from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
 from device_interface import PreviewDevice
+from plc_transfer import PLCConfig, PLCTransfer
+from plc_http import handle_plc
+from auto_workflow import AutomaticWorkflow
+from automatic_http import handle_automatic
+from camera_service import CameraConfig, CameraService
+from camera_http import handle_camera, is_local as camera_request_is_local
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = HERE/'mycelium_v3.pt'
-APP_VERSION = 10
+APP_VERSION = 15
 MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
@@ -148,7 +154,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urlsplit(self.path).path
         if path == '/':
             return self.reply(200, (HERE/'web.html').read_bytes(), 'text/html; charset=utf-8')
-        if path in ('/planner.js', '/planner.css'):
+        if path in ('/planner.js', '/planner.css', '/plc_ui.js', '/automatic_ui.js', '/camera_ui.js'):
             kind = 'text/javascript; charset=utf-8' if path.endswith('.js') else 'text/css; charset=utf-8'
             return self.reply(200, (HERE/path[1:]).read_bytes(), kind)
         if path == '/api/health':
@@ -162,8 +168,21 @@ class Handler(BaseHTTPRequestHandler):
                                     'model_input_size': [self.server.predictor.config['width'], self.server.predictor.config['height']],
                                     'sampling_order': 'outer_boundary_layers',
                                     'sampling_planner': True, 'hardware_ready': False,
+                                    'plc_transfer_available': True,
+                                    'automatic_workflow_available': True,
+                                    'coordinate_test_available': True,
+                                    'camera_control_available': True,
+                                    'plc_host': self.server.plc_transfer.config.host,
                                     'shared': bool(getattr(self.server, 'public_origin_file', None)),
                                     'device': 'GPU' if self.server.predictor.device.type == 'cuda' else 'CPU'})
+        camera_match = re.fullmatch(r'/camera/captures/([0-9a-f]{32})\.png',path)
+        if camera_match:
+            if not camera_request_is_local(self):
+                return self.reply(403,{'error':'相机照片仅允许本机访问。'})
+            target = self.server.camera.image_path(camera_match[1])
+            if target.is_file():
+                return self.reply(200,target.read_bytes(),'image/png')
+            return self.reply(404,{'error':'照片不存在。'})
         plan_match = re.fullmatch(r'/results/([0-9a-f]{32})/plans/([0-9a-f]{32})/(plan\.json|points\.csv|preview\.json|layout\.svg)', path)
         if plan_match:
             folder = self.server.predictor.result_root/plan_match[1]
@@ -258,6 +277,12 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(500, {'error': '计算失败，请查看启动窗口或调整参数后重试。'})
 
     def do_POST(self):
+        if self.path.startswith('/api/camera/'):
+            return handle_camera(self)
+        if self.path.startswith('/api/automatic/'):
+            return handle_automatic(self)
+        if self.path.startswith('/api/plc/'):
+            return handle_plc(self)
         origin = self.headers.get('Origin')
         allowed = {f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'}
         public_origin = self.public_origin()
@@ -315,7 +340,11 @@ def main():
     parser.add_argument('--open', action='store_true')
     parser.add_argument('--public-origin-file', type=Path)
     parser.add_argument('--result-root', type=Path)
+    parser.add_argument('--plc-config', type=Path, default=HERE/'plc_config.json')
+    parser.add_argument('--automatic-state-dir', type=Path)
+    parser.add_argument('--camera-config', type=Path, default=HERE/'camera_config.json')
     args = parser.parse_args()
+    plc_transfer = PLCTransfer(PLCConfig.load(args.plc_config))
     if not args.model.is_file():
         parser.error(f'模型文件不存在：{args.model}。请按 README.md 准备权重，或用 --model 指定已有模型文件。')
     requested_hash = hashlib.sha256(args.model.read_bytes()).hexdigest()
@@ -338,6 +367,10 @@ def main():
     predictor = Predictor(args.model, args.result_root)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.predictor = predictor
+    server.plc_transfer = plc_transfer
+    server.automatic = AutomaticWorkflow(predictor, plc_transfer,
+                                         args.automatic_state_dir or predictor.result_root/'automatic')
+    server.camera = CameraService(CameraConfig.load(args.camera_config), predictor.result_root/'camera')
     server.public_origin_file = args.public_origin_file
     print('Ready:', url, flush=True)
     print('Keep this window open. Press Ctrl+C to stop.', flush=True)
@@ -348,6 +381,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        server.camera.close()
+        server.automatic.close()
         server.server_close()
 
 

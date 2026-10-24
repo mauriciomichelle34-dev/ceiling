@@ -6,14 +6,27 @@
   <title>菌丝体取样规划</title>
   <link rel="stylesheet" href="/planner.css">
   <script src="/planner.js" defer></script>
+  <script src="/plc_ui.js" defer></script>
+  <script src="/automatic_ui.js" defer></script>
+  <script src="/camera_ui.js" defer></script>
 </head>
 <body>
 <header class="topbar">
   <div class="brand"><span class="mark">M</span><div>菌丝体取样规划<small>MYCELIUM / SAMPLING WORKSPACE</small></div></div>
-  <div class="connection"><span id="statusDot" class="dot"></span><span id="health">正在连接模型…</span><span class="divider"></span><span>设备未连接</span></div>
+  <div class="connection"><span id="statusDot" class="dot"></span><span id="health">正在连接模型…</span><span class="divider"></span><span id="plcConnection">PLC 状态尚未读取</span></div>
 </header>
 <main class="workspace">
   <aside class="sidebar">
+    <section class="panel camera-panel" aria-label="相机拍照">
+      <h2>海康相机拍照 <span class="tag" id="cameraBadge">未连接</span></h2>
+      <p class="help">网页软件触发拍照。自动模式关闭时用于预览和标定；启动自动模式后，照片直接进入所选的处理流程。</p>
+      <label for="cameraSelect">相机设备</label><select id="cameraSelect"><option value="">请先搜索相机</option></select>
+      <div class="plc-buttons"><button id="cameraSearch" class="secondary">搜索相机</button><button id="cameraConnect" class="secondary" disabled>连接</button><button id="cameraDisconnect" class="secondary" disabled>断开</button></div>
+      <button id="cameraCapture" class="primary wide" disabled>拍照</button>
+      <p id="cameraStatus" class="muted" role="status" aria-live="polite">正在读取相机状态…</p>
+      <img id="cameraPreview" class="camera-preview" alt="相机最近一次拍摄的照片" hidden>
+      <a id="cameraDownload" class="text-link" hidden>打开原始照片</a>
+    </section>
     <section class="panel">
       <h2><span class="step">01</span> 培养皿照片</h2>
       <label class="drop" id="drop" for="files"><span class="upload-mark">↑</span><strong>点击上传 / 拖入图片</strong><span>JPG、PNG · 单张 ≤ 40 MB</span></label>
@@ -84,11 +97,30 @@
       <div class="table-wrap"><table><thead><tr><th>编号</th><th>层次</th><th>X / mm</th><th>Y / mm</th><th>取样深度 Z / mm</th><th>深度设置</th></tr></thead><tbody id="pointRows"><tr><td colspan="6" class="table-empty">生成排布后显示坐标。</td></tr></tbody></table></div>
       <div class="export-row"><span>导出规划</span><a id="csvDownload" class="download disabled">XYZ 坐标 CSV</a><a id="layoutDownload" class="download disabled">排布图 SVG</a><a id="jsonDownload" class="download disabled">完整规划 JSON</a></div>
     </section>
+    <section class="panel automatic-panel" aria-label="自动识别并下发">
+      <div class="section-head"><div><h2>自动识别并下发</h2><p class="help">先确认一次参考照片的标定和取样参数。启动后，新图片自动识别、划圈并交给 PLC。</p></div><span id="automaticBadge" class="tag">未启动</span></div>
+      <label for="automaticMode">处理模式</label><select id="automaticMode"><option value="coordinates_only">坐标覆盖测试 · 只写数据，不发送联动通知</option><option value="execute">联动执行 · 写坐标并发送完成信号</option></select>
+      <p class="automatic-flow" id="automaticFlow">接收照片 → 菌丝识别 → 划圈取点 → 覆盖 DB100 数量与坐标 → 等待下一张</p>
+      <p id="automaticStatus" class="help" role="status" aria-live="polite">正在读取自动处理状态…</p>
+      <p id="automaticSettings" class="muted"></p>
+      <div class="plc-buttons"><button id="automaticSaveStart" class="primary" disabled>保存当前参数并启动自动处理</button><button id="automaticStartSaved" class="secondary" disabled>使用已保存参数启动</button><button id="automaticStop" class="secondary" disabled>停止自动处理</button></div>
+      <p class="muted">启动后，上传区和相机拍照都可作为图片入口，每张照片无需再点生成或发送。修改参数前先停止自动处理。关闭网页不影响后台任务；外部硬件触发暂未接入。</p>
+      <div class="table-wrap"><table><thead><tr><th>照片</th><th>状态</th><th>点数</th><th>处理信息</th></tr></thead><tbody id="automaticJobs"><tr><td colspan="4" class="table-empty">还没有自动处理记录。</td></tr></tbody></table></div>
+    </section>
+    <section class="panel plc-panel" aria-label="PLC 坐标传输">
+      <div class="section-head"><div><h2>发送坐标到 PLC · DB100</h2><p class="help">1 mm = 100；每批最多 64 个点。只发送 X、Y 和数量，各点补偿值保留 PLC 原值。</p></div></div>
+      <p id="plcStatus" class="help" role="status" aria-live="polite">生成取样排布后可直接“仅覆盖坐标（测试）”；联动发送前需先查看待发送坐标。</p>
+      <div class="plc-buttons"><button id="plcPreview" class="secondary" disabled>查看待发送坐标</button><button id="plcTestWrite" class="primary" disabled>仅覆盖坐标（测试）</button><button id="plcSend" class="secondary" disabled>联动发送坐标到 PLC</button><button id="plcRead" class="secondary">读取 PLC 状态</button><button id="plcRelease" class="secondary" disabled>清除 PC 完成信号</button></div>
+      <p class="muted">“仅覆盖坐标”会先清除 4.0，再覆盖数量和 X/Y，写完保持 4.0=False，不等 4.2，可连续覆盖测试。补偿字段保留原值。</p>
+      <p id="plcPreviewInfo" class="muted"></p>
+      <div class="table-wrap" id="plcPreviewTable" hidden><table><thead><tr><th>PLC 点位</th><th>X / mm</th><th>Y / mm</th><th>PLC X 整数</th><th>PLC Y 整数</th></tr></thead><tbody id="plcRows"></tbody></table></div>
+      <p class="muted">写入并核对全部坐标和数量后，才置位“PC给完数据”。“PLC点位取完”表示取数反馈；不代表设备动作完成。取数后可清除 PC 完成信号，PLC 反馈位由 PLC 程序复位。</p>
+    </section>
     <section class="panel device-panel" id="devicePanel">
-      <div class="section-head"><div><h2>设备控制接口预览</h2><p class="help">预留“按点取样”的接口。当前只预览指令，设备连接后再补充具体控制方式。</p></div><button id="previewActions" class="secondary" disabled>预览取样指令</button></div>
+      <div class="section-head"><div><h2>取样动作预览</h2><p class="help">这里预览包含取样深度的完整指令。向 DB100 发送 X、Y 坐标，请使用上方传输按钮。</p></div><button id="previewActions" class="secondary" disabled>预览取样指令</button></div>
       <pre id="actions" hidden></pre><a id="deviceDownload" class="text-link disabled">下载接口预览 JSON</a>
     </section>
-    <p class="footnote">请对照原图检查菌丝识别结果。自动排布尝试多个方向和偏移，不保证全局最优；样本坐标还需标定到设备坐标后才能执行。</p>
+    <p class="footnote">请对照原图检查菌丝识别结果。自动排布尝试多个方向和偏移，不保证全局最优。当前 PLC 传输保留培养皿中心坐标，不增加相机与移液枪的坐标变换。</p>
   </section>
 </main>
 </body>
