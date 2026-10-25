@@ -20,6 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from model import UNet
 from inference import predict_probability
 from dish import detect_dish, restrict_to_dish, DishNotFound
+from infrared import detect_infrared, exclude_infrared, InfraredDetectionError
 from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area, with_left_positive_x
 from device_interface import PreviewDevice
 from plc_transfer import PLCConfig, PLCTransfer
@@ -31,7 +32,7 @@ from camera_http import handle_camera, is_local as camera_request_is_local
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = HERE/'mycelium_v4_full16.pt'
-APP_VERSION = 18
+APP_VERSION = 19
 MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
@@ -90,10 +91,14 @@ class Predictor:
         probability = predict_probability(self.network, source, self.config, self.device)
         mask = (probability >= self.config['threshold']).astype(np.uint8)
         mask = restrict_to_dish(mask, boundary)
+        infrared_mask, infrared_info = detect_infrared(source, boundary)
+        infrared_info['removed_foreground_pixels'] = int(np.count_nonzero((mask>0)&infrared_mask))
+        mask = exclude_infrared(mask, infrared_mask)
         identifier = uuid.uuid4().hex
         folder = self.result_root/identifier
         folder.mkdir(parents=True, exist_ok=False)
         Image.fromarray(mask).save(folder/'mask.png')
+        Image.fromarray(infrared_mask.astype(np.uint8)).save(folder/'infrared_ignore.png')
         preview = source.copy()
         preview.thumbnail((1400, 1050), Image.Resampling.LANCZOS)
         preview.save(folder/'original.jpg', quality=92)
@@ -109,6 +114,8 @@ class Predictor:
                 'region': f'/results/{identifier}/region.png',
                 'region_outline': f'/results/{identifier}/region_outline.png',
                 'region_bounds': region_bounds,
+                'infrared': infrared_info,
+                'infrared_ignore_mask': f'/results/{identifier}/infrared_ignore.png',
                 'dish_boundary': boundary, 'dish_suggestion': dish_suggestion}
         (folder/'metadata.json').write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
         return meta
@@ -161,6 +168,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, {'app': 'mycelium-local', 'ready': True, 'version': APP_VERSION,
                                     'original_image_inference': True,
                                     'dish_interior_only': True,
+                                    'infrared_exclusion_available': True,
+                                    'infrared_exclusion_method': 'red_halo_bright_core_v1',
                                     'area_measurement': True, 'region_animation': True,
                                     'model': self.server.predictor.model_name,
                                     'model_sha256': self.server.predictor.model_sha256,
@@ -203,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
             if kind == 'layout.svg':
                 return self.reply(200, layout_svg(plan, (folder/'original.jpg').read_bytes()), 'image/svg+xml', stem+'_sampling.svg')
             return self.reply(200, plan, download=stem+'_plan.json')
-        match = re.fullmatch(r'/results/([0-9a-f]{32})/(mask\.png|original\.jpg|overlay\.jpg|region\.png|region_outline\.png)', path)
+        match = re.fullmatch(r'/results/([0-9a-f]{32})/(mask\.png|original\.jpg|overlay\.jpg|region\.png|region_outline\.png|infrared_ignore\.png)', path)
         if match:
             folder = self.server.predictor.result_root/match[1]
             target = folder/match[2]
@@ -322,6 +331,8 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.reply(408, {'error': '上传超时，请检查网络后重试。'})
         except DishNotFound as exc:
+            self.reply(422, {'error': str(exc)})
+        except InfraredDetectionError as exc:
             self.reply(422, {'error': str(exc)})
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
             self.reply(400, {'error': '无法读取图片。请使用 40 MB、2500 万像素以内的有效 JPG 或 PNG。'})

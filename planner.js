@@ -296,6 +296,11 @@ function showPhoto(photo) {
   $('filename').textContent = photo.meta.name;
   $('imageInfo').textContent = `${photo.meta.width} × ${photo.meta.height} px · 已识别菌丝区域`;
   $('scopeInfo').textContent = '完整原图保持不变。白色虚线自动圈出培养皿内缘，菌丝结果只显示在边界内。';
+  if (photo.meta.infrared?.status === 'excluded') {
+    $('scopeInfo').textContent += ' 已自动排除红外亮点及紧贴光晕，附近菌丝仍按模型预测保留。';
+  } else if (photo.meta.infrared) {
+    $('scopeInfo').textContent += ' 本图未检测到符合条件的红外亮点，请核对原图。';
+  }
   $('empty').hidden = true; $('canvas').hidden = false; $('actions').hidden = true;
   $('pickHint').textContent = '青色圆是标定参考，请确认与培养皿匹配。';
   renderTable(); controls(); draw();
