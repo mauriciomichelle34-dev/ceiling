@@ -7,10 +7,15 @@ const automaticLoaded = new Set();
 const automaticPhases = {queued:'等待处理', recognizing:'识别中', planning:'划圈中',
   waiting_idle:'等待交接空闲', sending:'写入 PLC', writing_coordinates:'覆盖坐标', waiting_taken:'等待 PLC 取数',
   releasing:'收回 PC 信号', waiting_reset:'等待 PLC 复位', completed:'交接完成',
+  waiting_cycle_finish:'等待设备完成及复位',
   failed:'已停止 · 需处理', cancelled:'已停止', interrupted:'上次中断 · 未重发'};
 
 function automaticLocksPLC() {
-  return automaticEnabled || Boolean(automaticSnapshot?.active_job_id);
+  return automaticEnabled || Boolean(automaticSnapshot?.active_job_id || automaticSnapshot?.camera_busy);
+}
+
+function plcCameraControls() {
+  return automaticLocksPLC() && automaticSnapshot?.settings?.input_source === 'plc_camera';
 }
 
 function updateAutomaticControls() {
@@ -19,11 +24,13 @@ function updateAutomaticControls() {
     calibration(); numeric('diameter', '取样圆直径', true);
     numeric('gap', '间隙'); numeric('defaultZ', '统一深度'); valid = true;
   } catch {}
-  const active = Boolean(automaticSnapshot?.active_job_id);
+  const active = Boolean(automaticSnapshot?.active_job_id || automaticSnapshot?.camera_busy);
   $('automaticSaveStart').disabled = busy || automaticEnabled || active || !valid;
   $('automaticStartSaved').disabled = busy || automaticEnabled || active || !automaticSnapshot?.configured;
   $('automaticStop').disabled = !automaticEnabled && !active;
-  $('automaticMode').disabled = busy || automaticEnabled || active;
+  $('automaticMode').disabled = busy || automaticEnabled || active || $('automaticSource').value === 'plc_camera';
+  $('automaticSource').disabled = busy || automaticEnabled || active;
+  $('automaticCycleTimeout').disabled = busy || automaticEnabled || active;
 }
 
 async function automaticRequest(action, body = {}) {
@@ -35,23 +42,33 @@ async function automaticRequest(action, body = {}) {
 }
 
 function renderAutomatic(data) {
+  const initial = automaticSnapshot === null;
   automaticSnapshot = data; automaticEnabled = data.enabled;
   const mode = data.settings?.transfer_mode || 'execute';
-  $('automaticBadge').textContent = data.enabled ? mode === 'coordinates_only' ? '坐标测试运行' : '联动运行' : data.active_job_id ? '正在结束当前任务' : '未启动';
-  if (data.enabled || data.active_job_id) $('automaticMode').value = mode;
+  const plcCamera = data.settings?.input_source === 'plc_camera';
+  $('automaticBadge').textContent = data.enabled ? plcCamera ? '无人循环运行' : mode === 'coordinates_only' ? '坐标测试运行' : '联动运行' : data.active_job_id || data.camera_busy ? '正在结束当前任务' : '未启动';
+  if (data.enabled || data.active_job_id || data.camera_busy || (initial && data.settings)) {
+    $('automaticMode').value = mode;
+    $('automaticSource').value = data.settings.input_source || 'received_images';
+    $('automaticCycleTimeout').value = data.settings.cycle_timeout_s || 1800;
+  }
   updateAutomaticFlow();
   $('automaticBadge').classList.toggle('saved', data.enabled);
   const settings = data.settings;
   $('automaticSettings').textContent = settings
-    ? `${mode === 'coordinates_only' ? '坐标覆盖测试' : '联动执行'}；固定参数：${settings.image_width} × ${settings.image_height} px；培养皿 ${settings.calibration.dish_diameter_mm} mm；取样圆 ${settings.diameter_mm} mm；间隙 ${settings.gap_mm} mm。`
+    ? `${plcCamera ? 'PLC 到位自动拍照' : mode === 'coordinates_only' ? '坐标覆盖测试' : '联动执行'}；固定参数：${settings.image_width} × ${settings.image_height} px；培养皿 ${settings.calibration.dish_diameter_mm} mm；取样圆 ${settings.diameter_mm} mm；间隙 ${settings.gap_mm} mm。`
     : '首次使用：先上传参考照片，填写培养皿实际直径并确认标定，再保存当前参数。';
   const active = data.jobs.find(job => job.job_id === data.active_job_id);
   const latest = active || data.jobs[0];
-  if (latest?.plc_status) showPLCStatus(latest.plc_status);
+  if (active?.plc_status) showPLCStatus(active.plc_status);
+  else if (data.enabled && plcCamera && data.camera_trigger?.plc_status) showPLCStatus(data.camera_trigger.plc_status);
+  else if (latest?.plc_status) showPLCStatus(latest.plc_status);
   $('automaticStatus').textContent = active ? active.message
-    : data.enabled ? `已启动，等待新照片。待处理 ${data.queued} 张。`
+    : data.enabled ? plcCamera ? data.camera_trigger.message : `已启动，等待新照片。待处理 ${data.queued} 张。`
+    : data.last_error ? `自动处理已停止：${data.last_error}`
     : latest?.state === 'failed' ? `自动处理已停止：${latest.message}`
     : latest?.state === 'interrupted' ? latest.message : '自动处理未启动。';
+  if (data.camera_trigger?.image_url && typeof showCameraFrame === 'function') showCameraFrame(data.camera_trigger);
   const rows = $('automaticJobs'); rows.replaceChildren();
   for (const job of data.jobs) {
     const row = document.createElement('tr');
@@ -104,25 +121,33 @@ async function refreshAutomatic() {
     $('automaticStatus').textContent = `自动处理状态暂时无法读取：${error.message}`;
   } finally {
     automaticReading = false;
-    if (automaticEnabled || automaticSnapshot?.active_job_id) automaticTimer = setTimeout(refreshAutomatic, 1000);
+    if (automaticEnabled || automaticSnapshot?.active_job_id || automaticSnapshot?.camera_busy) automaticTimer = setTimeout(refreshAutomatic, 1000);
   }
 }
 
 async function startAutomatic(useSaved) {
   if (busy) return;
   try {
+    const source = $('automaticSource').value;
+    if (source === 'plc_camera') {
+      const response = await fetch('/api/health'), capabilities = await response.json();
+      if (!capabilities.plc_camera_trigger_available) throw Error('请先重启支持 PLC 到位拍照的新版后台。');
+      $('automaticMode').value = 'execute';
+    }
     if ($('automaticMode').value === 'coordinates_only') {
       const capabilitiesResponse = await fetch('/api/health');
       const capabilities = await capabilitiesResponse.json();
       if (!capabilities.coordinate_test_available) throw Error('当前后台尚未支持坐标测试，请先重启新版程序。');
     }
-    let body = useSaved ? {settings:{...automaticSnapshot.settings, transfer_mode:$('automaticMode').value}} : {};
+    let body = useSaved ? {settings:{...automaticSnapshot.settings, transfer_mode:$('automaticMode').value,
+      input_source:source, cycle_timeout_s:numeric('automaticCycleTimeout','设备循环等待时间',true)}} : {};
     if (!useSaved) body.settings = {image_width:current.meta.width, image_height:current.meta.height,
       calibration:calibration(), diameter_mm:numeric('diameter', '取样圆直径', true),
       gap_mm:numeric('gap', '间隙'), default_depth_mm:numeric('defaultZ', '统一深度'), plc_timeout_s:60,
-      transfer_mode:$('automaticMode').value};
+      transfer_mode:$('automaticMode').value, input_source:source,
+      cycle_timeout_s:numeric('automaticCycleTimeout','设备循环等待时间',true)};
     renderAutomatic(await automaticRequest('start', body));
-    notice($('automaticMode').value === 'coordinates_only'
+    notice(source === 'plc_camera' ? '无人循环已启动：监听 PLC 到位，自动拍照、识别、划圈和下发；等待 PLC 复位后响应下一轮。' : $('automaticMode').value === 'coordinates_only'
       ? '坐标覆盖测试已启动。新照片自动覆盖数量和坐标，4.0 保持 False，不发送联动通知。'
       : '联动执行已启动。新照片自动识别、划圈、写入 PLC 并发送完成信号。');
     refreshAutomatic();
@@ -131,6 +156,7 @@ async function startAutomatic(useSaved) {
 
 async function uploadAutomatic(files) {
   if (busy || !ready || !files.length) return;
+  if (plcCameraControls()) { notice('PLC 到位自动拍照运行中，请先停止后再手动上传。',true); return; }
   busy = true; uploading = true; controls();
   try {
     for (const file of files) {
@@ -150,10 +176,20 @@ async function uploadAutomatic(files) {
 }
 
 function updateAutomaticFlow() {
+  const plcCamera = $('automaticSource').value === 'plc_camera';
+  $('automaticCycleOptions').hidden = !plcCamera;
+  if (plcCamera) {
+    $('automaticMode').value = 'execute';
+    $('automaticFlow').textContent = '4.2=True → 自动拍照 → 识别划圈 → 写数量与坐标 → 4.0=True → PLC 执行动作并复位两位 → 下一轮';
+    updateAutomaticControls();
+    return;
+  }
   $('automaticFlow').textContent = $('automaticMode').value === 'coordinates_only'
     ? '接收照片 → 菌丝识别 → 划圈取点 → 覆盖 DB100 数量与坐标 → 等待下一张'
     : '接收照片 → 菌丝识别 → 划圈取点 → 写入 DB100 → 等待 PLC 取数 → 接收下一张';
+  updateAutomaticControls();
 }
+$('automaticSource').addEventListener('change', updateAutomaticFlow);
 $('automaticMode').addEventListener('change', updateAutomaticFlow);
 $('automaticSaveStart').addEventListener('click', () => startAutomatic(false));
 $('automaticStartSaved').addEventListener('click', () => startAutomatic(true));

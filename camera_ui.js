@@ -4,7 +4,8 @@ let cameraWorking = false;
 
 function updateCameraControls() {
   const connected = Boolean(cameraSnapshot?.connected);
-  const working = busy || cameraWorking || Boolean(cameraSnapshot?.busy);
+  const working = busy || cameraWorking || Boolean(cameraSnapshot?.busy)
+    || (typeof plcCameraControls === 'function' && plcCameraControls());
   $('cameraSearch').disabled = working;
   $('cameraSelect').disabled = working || connected;
   $('cameraConnect').disabled = working || connected || !$('cameraSelect').value;

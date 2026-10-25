@@ -193,7 +193,7 @@ function controls() {
   const has = Boolean(current), plan = current?.plan, geometric = geometryDirty(), depths = depthDirty();
   let validCalibration = false;
   try { calibration(); validCalibration = true; } catch {}
-  $('files').disabled = busy || !ready;
+  $('files').disabled = busy || !ready || (typeof plcCameraControls === 'function' && plcCameraControls());
   $('photoSelect').disabled = busy;
   for (const id of ['pickCenter', 'pickEdge']) $(id).disabled = !has || busy || automaticLock;
   $('saveCalibration').disabled = !validCalibration || busy || automaticLock;
@@ -212,7 +212,7 @@ function controls() {
   } else {
     $('pointCount').textContent = '—'; $('coverage').textContent = '—';
     $('planStatus').textContent = busy ? '处理中' : '尚未生成';
-    $('planDetails').textContent = 'X 向右 · Y 向上 · 原点在培养皿中心';
+    $('planDetails').textContent = 'X 向左为正 · Y 向上为正 · 原点在培养皿中心';
   }
   const downloadable = Boolean(plan && !geometric && !depths && !busy);
   const files = ['points.csv', 'layout.svg', 'plan.json', 'preview.json'];

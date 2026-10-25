@@ -1,7 +1,7 @@
 """Image receipt -> segmentation -> sampling plan -> verified DB100 transfer.
 
-The PLC owns DBX4.2. This service only withdraws PC-owned DBX4.0 after
-acknowledgment, and never controls machine motion or calls a camera SDK.
+The PLC owns DBX4.2. In PLC-camera mode it signals photo position and the PLC
+resets both handshake bits after executing the batch. CameraService handles SDK I/O.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import queue
 import re
 import threading
 import time
+import uuid
 
 import numpy as np
 from PIL import Image
@@ -54,8 +55,15 @@ def validate_settings(value):
     mode = value.get('transfer_mode', 'execute')
     if mode not in ('execute', 'coordinates_only'):
         raise ValueError('请选择“坐标覆盖测试”或“联动执行”。')
+    source = value.get('input_source', 'received_images')
+    if source not in ('received_images', 'plc_camera'):
+        raise ValueError('请选择接收图片或 PLC 到位自动拍照。')
+    if source == 'plc_camera' and mode != 'execute':
+        raise ValueError('PLC 到位自动拍照需要使用“联动执行”，完成后由 PLC 复位两位信号。')
     return {'image_width': width, 'image_height': height, 'calibration': calibration,
             'transfer_mode': mode,
+            'input_source': source,
+            'cycle_timeout_s': number(value.get('cycle_timeout_s', 1800), '设备循环等待时间', minimum=1, maximum=86400),
             'diameter_mm': number(value.get('diameter_mm'), '取样圆直径', positive=True),
             'gap_mm': number(value.get('gap_mm'), '圆边缘间隙'),
             'default_depth_mm': number(value.get('default_depth_mm'), '统一深度', maximum=1000),
@@ -63,8 +71,9 @@ def validate_settings(value):
 
 
 class AutomaticWorkflow:
-    def __init__(self, predictor, transfer, state_dir):
+    def __init__(self, predictor, transfer, state_dir, camera=None):
         self.predictor, self.transfer = predictor, transfer
+        self.camera = camera
         self.root = Path(state_dir)
         for name in ('jobs', 'images'):
             (self.root/name).mkdir(parents=True, exist_ok=True)
@@ -75,6 +84,10 @@ class AutomaticWorkflow:
         self.enabled = False  # Explicitly start each program session; settings persist.
         self.active_id = None
         self.settings = None
+        self.run_id = None
+        self.camera_busy = False
+        self.last_error = None
+        self.camera_trigger = {'state':'stopped', 'message':'PLC 到位自动拍照未启动。'}
         self.jobs = {}
         settings_path = self.root/'settings.json'
         if settings_path.is_file():
@@ -88,12 +101,18 @@ class AutomaticWorkflow:
             self.jobs[job['job_id']] = job
         self.thread = threading.Thread(target=self._worker, name='automatic-image-workflow', daemon=True)
         self.thread.start()
+        self.camera_thread = None
+        if camera is not None:
+            self.camera_thread = threading.Thread(target=self._camera_worker, name='plc-camera-trigger', daemon=True)
+            self.camera_thread.start()
 
     def snapshot(self):
         with self.lock:
             recent = sorted(self.jobs.values(), key=lambda j: j['created_at'], reverse=True)[:10]
             return {'enabled': self.enabled, 'configured': self.settings is not None,
                     'settings': copy.deepcopy(self.settings), 'active_job_id': self.active_id,
+                    'camera_busy': self.camera_busy, 'camera_trigger': copy.deepcopy(self.camera_trigger),
+                    'last_error': self.last_error,
                     'queued': self.pending.qsize(), 'jobs': [self._public(j, details=False) for j in recent]}
 
     @staticmethod
@@ -115,14 +134,29 @@ class AutomaticWorkflow:
         with self.lock:
             if self.closed:
                 raise WorkflowError('自动处理服务已关闭。')
-            if self.active_id or not self.pending.empty():
+            if self.active_id or self.camera_busy or not self.pending.empty():
                 raise WorkflowError('当前图片尚未结束，请等待后再修改自动参数。')
+            candidate = validated if validated is not None else self.settings
+            if candidate is not None and candidate['input_source'] == 'plc_camera':
+                if self.camera is None or not self.camera.status()['connected']:
+                    raise WorkflowError('请先在网页连接海康相机，再启动 PLC 到位自动拍照。')
+                if self.camera.status()['busy']:
+                    raise WorkflowError('相机正在执行其他操作，请等待拍照完成。')
+                try:
+                    initial_status = self.transfer.status()
+                except Exception as exc:
+                    raise WorkflowError(f'启动前读取 PLC 失败：{exc}') from exc
+                if initial_status['pc_ready']:
+                    raise WorkflowError('DBX4.0 仍为 True，请等 PLC 完成本轮并复位后再启动。')
             if validated is not None:
                 atomic_json(self.root/'settings.json', validated)
                 self.settings = validated
             if self.settings is None:
                 raise WorkflowError('请先用参考照片确认标定和取样参数。')
             self.wake.clear()
+            self.run_id = uuid.uuid4().hex
+            self.last_error = None
+            self.camera_trigger = {'state':'waiting_ready', 'message':'等待 PLC 到拍照位置，将 DBX4.2 置为 True。'}
             self.enabled = True
         return self.snapshot()
 
@@ -145,9 +179,10 @@ class AutomaticWorkflow:
             self.enabled = False
             self.wake.set()
             self._cancel_pending()
+            self.camera_trigger.update(state='stopped', message='PLC 到位自动拍照已停止。')
         return self.snapshot()
 
-    def submit(self, raw, filename, capture_id):
+    def submit(self, raw, filename, capture_id, *, source='received_images'):
         if not isinstance(capture_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,96}', capture_id):
             raise ValueError('每次拍摄需提供独立的 X-Capture-ID（字母、数字、下划线或短横线，最多 96 字符）。')
         if not raw or len(raw) > 40*1024*1024:
@@ -162,6 +197,8 @@ class AutomaticWorkflow:
                 return {**self._public(job), 'duplicate': True}
             if not self.enabled or self.closed:
                 raise WorkflowError('自动处理未启动；图片未进入下发流程。')
+            if (self.settings['input_source'] == 'plc_camera') != (source == 'plc_camera'):
+                raise WorkflowError('PLC 到位模式只接收本轮到位触发的相机照片，请勿手动上传或拍照插入队列。')
             if self.pending.full():
                 raise WorkflowError('待处理队列已满，图片未接收；请保留拍摄编号，稍后再提交。')
             job = {'job_id': job_id, 'capture_id': capture_id, 'filename': filename,
@@ -178,9 +215,9 @@ class AutomaticWorkflow:
         if not self.enabled or self.closed:
             raise WorkflowStopped('自动处理已停止。')
 
-    def _wait_plc(self, job, predicate, state, message, initial=None):
+    def _wait_plc(self, job, predicate, state, message, initial=None, timeout=None):
         self._set(job, state, message)
-        deadline = time.monotonic() + job['settings']['plc_timeout_s']
+        deadline = time.monotonic() + (job['settings']['plc_timeout_s'] if timeout is None else timeout)
         last_error = None
         status = initial
         while True:
@@ -237,6 +274,16 @@ class AutomaticWorkflow:
             if locked:
                 self.predictor.lock.release()
             self.predictor.slots.release()
+        if settings['input_source'] == 'plc_camera':
+            self._check_enabled()
+            self._set(job, 'sending', '正在到位信号保持期间写入、核对全部坐标和数量。')
+            result = self.transfer.send_for_camera_cycle(plan)
+            self._set(job, 'waiting_cycle_finish', '数据已发完，等待 PLC 完成设备动作并复位 4.0 和 4.2。', transfer_result=result)
+            self._wait_plc(job, lambda s: not s['pc_ready'] and not s['plc_taken'],
+                           'waiting_cycle_finish', '等待 PLC 完成本轮并将 DBX4.0、DBX4.2 都复位为 False。',
+                           initial=result.get('status'), timeout=settings['cycle_timeout_s'])
+            self._set(job, 'completed', f"本轮 {plan['count']} 个点已完成交接，PLC 已复位；等待下一次到位。")
+            return
         if settings['transfer_mode'] == 'coordinates_only':
             self._check_enabled()
             self._set(job, 'writing_coordinates', '正在覆盖并核对坐标，仅测试数据，不发送联动通知。')
@@ -289,8 +336,83 @@ class AutomaticWorkflow:
                     self.active_id = None
                 self.pending.task_done()
 
+    def _camera_worker(self):
+        session, job_id, read_failures = None, None, 0
+        while not self.closed:
+            time.sleep(0.1)
+            with self.lock:
+                if not self.enabled or self.settings['input_source'] != 'plc_camera':
+                    continue
+                run_id = self.run_id
+                if session != run_id:
+                    session, job_id, read_failures = run_id, None, 0
+                if job_id is not None:
+                    job = self.jobs[job_id]
+                    if job['state'] != 'completed':
+                        continue
+                    # A completed camera job has observed both bits reset. Only now re-arm.
+                    job_id = None
+                if self.active_id or not self.pending.empty():
+                    continue
+            try:
+                status = self.transfer.status()
+                read_failures = 0
+            except Exception as exc:
+                read_failures += 1
+                if read_failures < 3:
+                    with self.lock:
+                        if self.enabled and self.run_id == run_id:
+                            self.camera_trigger.update(state='reading_plc', message=f'读取 PLC 暂时失败，正在重新读取（{read_failures}/3）：{exc}')
+                    continue
+                self._camera_failed(run_id, f'连续三次读取 PLC 失败：{exc}')
+                continue
+            try:
+                with self.lock:
+                    if not self.enabled or run_id != self.run_id:
+                        continue
+                    self.camera_trigger.update(plc_status=status)
+                    if status['pc_ready']:
+                        raise WorkflowError('等待拍照时 DBX4.0 仍为 True，停止监听；请先核对 PLC 是否已复位。')
+                    if not status['plc_taken']:
+                        self.camera_trigger.update(state='waiting_ready', message='等待 PLC 到拍照位置，将 DBX4.2 置为 True。')
+                        continue
+                    capture_id = 'plc-' + run_id + '-' + uuid.uuid4().hex
+                    self.camera_busy = True
+                    self.camera_trigger.update(state='capturing', message='已收到到位信号，正在自动拍照。', capture_id=capture_id)
+
+                def receive(raw, filename, identifier):
+                    with self.lock:
+                        if not self.enabled or self.run_id != run_id:
+                            raise WorkflowStopped('拍照期间自动处理已停止，本次照片保留但不下发。')
+                        return {'kind':'automatic', 'job':self.submit(raw, filename, identifier, source='plc_camera')}
+
+                frame = self.camera.capture(capture_id, 'plc-camera:'+run_id, receive)
+                if frame.get('processing_error'):
+                    raise WorkflowError(frame['processing_error'])
+                job_id = frame['processing']['job']['job_id']
+                with self.lock:
+                    self.camera_trigger.update(state='processing', message='本次到位已拍照，等待本轮处理及 PLC 复位，不重复拍摄。', job_id=job_id,
+                                               image_url=frame['image_url'])
+            except Exception as exc:
+                self._camera_failed(run_id, str(exc))
+            finally:
+                with self.lock:
+                    self.camera_busy = False
+
+    def _camera_failed(self, run_id, message):
+        with self.lock:
+            if self.run_id != run_id or not self.enabled:
+                return
+            self.enabled = False
+            self.last_error = message
+            self.camera_trigger.update(state='failed', message=message)
+            self.wake.set()
+            self._cancel_pending()
+
     def close(self):
         self.stop()
         self.closed = True
         self.wake.set()
+        if self.camera_thread is not None:
+            self.camera_thread.join(timeout=self.camera.config.capture_timeout_ms/1000+5)
         self.thread.join(timeout=3)

@@ -292,13 +292,13 @@ def make_plan(mask, calibration, diameter_mm, gap_mm, default_depth_mm):
     c = calibration
     items = [{'id': i+1, 'image_x_px': float(points[k, 0]), 'image_y_px': float(points[k, 1]),
               'layer': int(layers[k]), 'outer_edge_depth_mm': float(edge_depths[k]*c['mm_per_pixel']),
-              'x_mm': (points[k, 0]-c['center_x_px'])*c['mm_per_pixel'],
+              'x_mm': (c['center_x_px']-points[k, 0])*c['mm_per_pixel'],
               'y_mm': (c['center_y_px']-points[k, 1])*c['mm_per_pixel'], 'z_mm': depth,
               'depth_overridden': False} for i, k in enumerate(indices)]
     return {'schema_version': 1, 'plan_id': uuid.uuid4().hex,
             'created_at': datetime.now(timezone.utc).isoformat(),
             'units': 'mm', 'calibration': c,
-            'coordinate_frame': {'xy_origin': 'dish_center', 'x_positive': 'image_right',
+            'coordinate_frame': {'xy_origin': 'dish_center', 'x_positive': 'image_left',
                                  'y_positive': 'image_up', 'z_zero': 'medium_surface', 'z_positive': 'downward_depth'},
             'diameter_mm': diameter, 'gap_mm': gap, 'default_depth_mm': depth, 'radius_px': radius,
             'count': len(items), 'points': items, 'hardware_ready': False,
@@ -316,13 +316,24 @@ def make_plan(mask, calibration, diameter_mm, gap_mm, default_depth_mm):
                       'XYZ 是样本坐标和深度，尚未转换为设备坐标。']}
 
 
+def with_left_positive_x(plan):
+    """Adapt saved right-positive plans once, without moving their image points."""
+    if plan.get('coordinate_frame', {}).get('x_positive') != 'image_right':
+        return plan
+    result = copy.deepcopy(plan)
+    for point in result['points']:
+        point['x_mm'] = -point['x_mm']
+    result['coordinate_frame']['x_positive'] = 'image_left'
+    return result
+
+
 def with_depths(plan, default_depth_mm, overrides):
     if not isinstance(overrides, dict):
         raise ValueError('单点深度需要按编号填写。')
     known = {str(p['id']) for p in plan['points']}
     if not set(overrides).issubset(known):
         raise ValueError('存在无效的取样点编号。')
-    result = copy.deepcopy(plan)
+    result = copy.deepcopy(with_left_positive_x(plan))
     result['default_depth_mm'] = number(default_depth_mm, '默认取样深度', maximum=1000)
     for point in result['points']:
         key = str(point['id'])

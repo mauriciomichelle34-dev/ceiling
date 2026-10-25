@@ -20,7 +20,7 @@ from PIL import Image, UnidentifiedImageError
 from model import UNet
 from inference import predict_probability
 from dish import detect_dish, restrict_to_dish, DishNotFound
-from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
+from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area, with_left_positive_x
 from device_interface import PreviewDevice
 from plc_transfer import PLCConfig, PLCTransfer
 from plc_http import handle_plc
@@ -31,7 +31,7 @@ from camera_http import handle_camera, is_local as camera_request_is_local
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = HERE/'mycelium_v3.pt'
-APP_VERSION = 15
+APP_VERSION = 17
 MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 
@@ -172,6 +172,7 @@ class Handler(BaseHTTPRequestHandler):
                                     'automatic_workflow_available': True,
                                     'coordinate_test_available': True,
                                     'camera_control_available': True,
+                                    'plc_camera_trigger_available': True,
                                     'plc_host': self.server.plc_transfer.config.host,
                                     'shared': bool(getattr(self.server, 'public_origin_file', None)),
                                     'device': 'GPU' if self.server.predictor.device.type == 'cuda' else 'CPU'})
@@ -192,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
             plan_path = folder/'plans'/plan_match[2]/'plan.json'
             if not plan_path.is_file():
                 return self.reply(404, {'error': '未找到取样方案。'})
-            plan = json.loads(plan_path.read_text(encoding='utf-8'))
+            plan = with_left_positive_x(json.loads(plan_path.read_text(encoding='utf-8')))
             kind = plan_match[3]
             stem = Path(plan['source_name']).stem
             if kind == 'points.csv':
@@ -368,9 +369,9 @@ def main():
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.predictor = predictor
     server.plc_transfer = plc_transfer
-    server.automatic = AutomaticWorkflow(predictor, plc_transfer,
-                                         args.automatic_state_dir or predictor.result_root/'automatic')
     server.camera = CameraService(CameraConfig.load(args.camera_config), predictor.result_root/'camera')
+    server.automatic = AutomaticWorkflow(predictor, plc_transfer,
+                                         args.automatic_state_dir or predictor.result_root/'automatic', camera=server.camera)
     server.public_origin_file = args.public_origin_file
     print('Ready:', url, flush=True)
     print('Keep this window open. Press Ctrl+C to stop.', flush=True)
@@ -381,8 +382,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        server.camera.close()
         server.automatic.close()
+        server.camera.close()
         server.server_close()
 
 

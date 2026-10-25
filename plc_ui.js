@@ -22,7 +22,8 @@ function updatePLCControls() {
   $('plcSend').disabled = busy || automaticLock || !usable || !plcPreparedKey;
   $('plcTestWrite').disabled = busy || automaticLock || !usable;
   $('plcRead').disabled = busy;
-  $('plcRelease').disabled = busy || automaticLock || !plcLastStatus?.plc_taken;
+  const plcResetsCycle = typeof automaticSnapshot !== 'undefined' && automaticSnapshot?.settings?.input_source === 'plc_camera';
+  $('plcRelease').disabled = busy || automaticLock || plcResetsCycle || !plcLastStatus?.plc_taken;
 }
 
 function showPLCStatus(status) {

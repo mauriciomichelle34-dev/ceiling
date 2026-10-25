@@ -4,6 +4,7 @@ import json
 import re
 
 from plc_transfer import TransferError, prepare_plan
+from sampling import with_left_positive_x
 
 
 def handle_plc(handler):
@@ -28,11 +29,13 @@ def handle_plc(handler):
         transfer = handler.server.plc_transfer
         automatic = getattr(handler.server, 'automatic', None)
         if (handler.path in ('/api/plc/send', '/api/plc/test-write', '/api/plc/release') and automatic is not None
-                and (automatic.enabled or automatic.active_id)):
+                and (automatic.enabled or automatic.active_id or automatic.camera_busy)):
             raise TransferError('自动处理正在管理数据交接，请先停止自动处理并等当前任务结束，再手动发送或清除信号。')
         if handler.path == "/api/plc/status":
             result = transfer.status()
         elif handler.path == "/api/plc/release":
+            if automatic is not None and automatic.settings is not None and automatic.settings['input_source'] == 'plc_camera':
+                raise TransferError('PLC 到位拍照模式由 PLC 自行复位 4.0 和 4.2，请等待设备完成本轮动作。')
             result = transfer.release()
         elif handler.path in ("/api/plc/preview", "/api/plc/send", "/api/plc/test-write"):
             prediction_id, plan_id = body.get("prediction_id"), body.get("plan_id")
@@ -43,7 +46,7 @@ def handle_plc(handler):
             path = folder / "plans" / plan_id / "plan.json"
             if not path.is_file():
                 return handler.reply(404, {"error": "取样规划不存在，请重新生成。"})
-            plan = json.loads(path.read_text(encoding="utf-8"))
+            plan = with_left_positive_x(json.loads(path.read_text(encoding="utf-8")))
             if handler.path.endswith('preview'):
                 result = prepare_plan(plan)
             elif handler.path.endswith('test-write'):

@@ -30,6 +30,11 @@ def handle_camera(handler):
             raise ValueError('请求必须是 JSON 对象。')
         camera = handler.server.camera
         path = handler.path
+        workflow = handler.server.automatic
+        with workflow.lock:
+            plc_controls_camera = (workflow.enabled or workflow.active_id or workflow.camera_busy) and workflow.settings is not None and workflow.settings['input_source'] == 'plc_camera'
+        if plc_controls_camera and path in ('/api/camera/search','/api/camera/connect','/api/camera/disconnect','/api/camera/capture'):
+            raise CameraError('PLC 到位自动拍照正在管理相机，请先停止自动处理并等待当前操作结束。')
         if path=='/api/camera/status':
             result = camera.status()
         elif path=='/api/camera/search':
@@ -39,7 +44,6 @@ def handle_camera(handler):
         elif path=='/api/camera/disconnect':
             result = camera.disconnect()
         elif path=='/api/camera/capture':
-            workflow = handler.server.automatic
             with workflow.lock:
                 automatic = workflow.enabled
                 settings = copy.deepcopy(workflow.settings)

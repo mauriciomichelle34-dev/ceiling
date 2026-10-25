@@ -154,14 +154,14 @@ class PLCTransfer:
             with self.connection() as connection:
                 result = self.read_status(connection)
                 result.update(connected=True, host=self.config.host, db=self.config.db,
-                              note="PLC点位取完仅表示取数反馈，不代表设备动作完成。")
+                              note="DBX4.2 由 PLC 控制；其含义取决于所选交接模式。")
                 return result
         except TransferError:
             raise
         except Exception as exc:
             raise TransferError(f"读取 PLC 失败：{type(exc).__name__}: {exc}") from exc
 
-    def send(self, plan):
+    def send(self, plan, *, camera_cycle=False):
         prepared = prepare_plan(plan)  # Validate the entire batch before connecting.
         notification = "not_sent"
         stage = "连接"
@@ -169,7 +169,9 @@ class PLCTransfer:
             with self.connection() as connection:
                 stage = "检查握手状态"
                 status = self.read_status(connection)
-                if status["pc_ready"] or status["plc_taken"]:
+                if status["pc_ready"] or status["plc_taken"] != camera_cycle:
+                    if camera_cycle:
+                        raise TransferError("到位拍照交接状态已改变：下发前需要 DBX4.0=False、DBX4.2=True。未写入坐标。")
                     raise TransferError("握手尚未回到初始状态：发送前 DBX4.0 和 DBX4.2 都应为 False。请先读取并核对 PLC 状态。")
                 stage = "写入坐标"
                 for point in prepared["points"]:
@@ -187,7 +189,7 @@ class PLCTransfer:
                 if connection.read(0, 4) != encoded_count:
                     raise TransferError("点位数量读回不一致，未发送完成信号。")
                 status = self.read_status(connection)
-                if status["pc_ready"] or status["plc_taken"]:
+                if status["pc_ready"] or status["plc_taken"] != camera_cycle:
                     raise TransferError("传输期间握手状态改变，未发送完成信号；请检查是否有其他程序在写 DB100。")
                 stage = "发送完成信号"
                 notification = "unknown"
@@ -196,6 +198,8 @@ class PLCTransfer:
                 result = {"ok": True, "count": prepared["count"], "verified": True,
                           "notification": notification, "plan_id": prepared["plan_id"],
                           "message": f"已核对 {prepared['count']} 个点及数量，并发送 PC 完成信号。"}
+                if camera_cycle:
+                    result['mode'] = 'plc_camera_cycle'
                 try:
                     result["status"] = self.read_status(connection)
                 except Exception:
@@ -210,6 +214,10 @@ class PLCTransfer:
                 detail = "未发送完成信号；PLC 内可能留有部分数据，排除问题后可重新发送完整批次。"
             raise TransferError(f"{stage}失败：{type(exc).__name__}: {exc}。{detail}",
                                 notification=notification) from exc
+
+    def send_for_camera_cycle(self, plan):
+        """4.2 is held high from photo position until PLC finishes this cycle."""
+        return self.send(plan, camera_cycle=True)
 
     def write_coordinates(self, plan):
         """Overwrite XY/count for data tests, keeping PC-ready low throughout."""
