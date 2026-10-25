@@ -30,8 +30,8 @@ from camera_service import CameraConfig, CameraService
 from camera_http import handle_camera, is_local as camera_request_is_local
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_MODEL = HERE/'mycelium_v3.pt'
-APP_VERSION = 17
+DEFAULT_MODEL = HERE/'mycelium_v4_full16.pt'
+APP_VERSION = 18
 MAX_BYTES = 40*1024*1024
 Image.MAX_IMAGE_PIXELS = 25_000_000
 

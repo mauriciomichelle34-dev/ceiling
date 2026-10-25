@@ -12,7 +12,7 @@ from inference import predict_probability
 def main():
     parser = argparse.ArgumentParser(description='菌丝体图片分割')
     parser.add_argument('image', type=Path, help='输入照片')
-    parser.add_argument('--model', type=Path, default=Path(__file__).with_name('mycelium_v3.pt'))
+    parser.add_argument('--model', type=Path, default=Path(__file__).with_name('mycelium_v4_full16.pt'))
     parser.add_argument('--output', type=Path, default=Path('results'))
     args = parser.parse_args()
     torch.set_num_threads(4)

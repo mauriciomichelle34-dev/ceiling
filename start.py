@@ -37,8 +37,8 @@ def main():
     args, app_args = parser.parse_known_args()
     if sys.version_info < (3, 10):
         parser.error('Python 3.10 or newer is required; Python 3.11 is recommended.')
-    if not (HERE/'mycelium_v3.pt').is_file() and '--model' not in app_args:
-        parser.error('mycelium_v3.pt is missing. Extract the complete project.')
+    if not (HERE/'mycelium_v4_full16.pt').is_file() and '--model' not in app_args:
+        parser.error('mycelium_v4_full16.pt is missing. Extract the complete project or use --model mycelium_v3.pt.')
     ready = dependencies_ready()
     if args.check:
         print('Model found. Dependencies ready.' if ready else 'Dependencies missing. Run python start.py to set them up.')

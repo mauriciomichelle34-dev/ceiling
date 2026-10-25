@@ -19,6 +19,8 @@ venv/
 *.pt
 !/mycelium_v2.pt
 !/mycelium_v3.pt
+!/mycelium_v4_full16.pt
+!/mycelium_v4_camera.pt
 *.pth
 *.onnx
 *.log
