@@ -24,13 +24,21 @@
       <div class="plc-buttons"><button id="cameraSearch" class="secondary">搜索相机</button><button id="cameraConnect" class="secondary" disabled>连接</button><button id="cameraDisconnect" class="secondary" disabled>断开</button></div>
       <button id="cameraCapture" class="primary wide" disabled>拍照</button>
       <p id="cameraStatus" class="muted" role="status" aria-live="polite">正在读取相机状态…</p>
+      <div class="camera-light" aria-label="拍照补光">
+        <label class="light-toggle"><input id="cameraLightEnabled" type="checkbox" checked> 拍照时自动补光 · CH1</label>
+        <label for="cameraLightBrightness">补光亮度 <span>1–255</span></label>
+        <input id="cameraLightBrightness" type="number" min="1" max="255" step="1" value="170">
+        <div class="plc-buttons"><button id="cameraLightSave" class="secondary" disabled>保存补光参数</button><button id="cameraLightProbe" class="secondary" disabled>检查光源</button></div>
+        <p id="cameraLightStatus" class="muted" role="status" aria-live="polite">正在读取补光设置…</p>
+        <p class="muted">修改后请保存。拍照前开灯，取到图像后关灯；网页拍照和 PLC 自动拍照共用此设置。</p>
+      </div>
       <img id="cameraPreview" class="camera-preview" alt="相机最近一次拍摄的照片" hidden>
       <a id="cameraDownload" class="text-link" hidden>打开原始照片</a>
     </section>
     <section class="panel">
       <h2><span class="step">01</span> 培养皿照片</h2>
-      <label class="drop" id="drop" for="files"><span class="upload-mark">↑</span><strong>点击上传 / 拖入图片</strong><span>JPG、PNG · 单张 ≤ 40 MB</span></label>
-      <input id="files" type="file" accept="image/jpeg,image/png" multiple hidden>
+      <label class="drop" id="drop" for="files"><span class="upload-mark">↑</span><strong>点击上传 / 拖入图片</strong><span>JPG、PNG、BMP · 单张 ≤ 100 MB</span></label>
+      <input id="files" type="file" accept="image/jpeg,image/png,image/bmp,.bmp" multiple hidden>
       <label id="photoSelectLabel" for="photoSelect" hidden>切换照片</label><select id="photoSelect" hidden></select>
       <p class="muted" id="imageInfo">上传后自动定位培养皿内边缘，仅识别皿内菌丝。</p>
       <p class="muted" id="scopeInfo">白色虚线为识别边界，青色圆用于尺寸标定。</p>
@@ -44,35 +52,20 @@
       <p class="muted" id="cultureHelper">本批所有照片共用，修改后同步到右侧。</p>
       <button id="resetCulture" class="secondary wide" type="button">重置培养资料</button>
     </section>
-    <section class="panel">
-      <h2><span class="step">03</span> 培养皿标定 <span class="tag" id="calibrationBadge">待确认</span></h2>
-      <p class="help">填写实际直径后自动测算菌丝面积。请确认青色圆与培养皿匹配；照片尺寸、位置固定时可保存标定复用。</p>
-      <label for="dishMm">培养皿实际直径 <span>mm</span></label>
-      <input id="dishMm" type="number" min="0.001" step="any" placeholder="填写实测直径">
-      <details id="calibrationDetails">
-        <summary>查看 / 调整照片中的培养皿圆</summary>
-        <div class="pair"><div><label for="centerX">圆心横坐标 <span>px</span></label><input id="centerX" type="number" step="any"></div><div><label for="centerY">圆心纵坐标 <span>px</span></label><input id="centerY" type="number" step="any"></div></div>
-        <label for="dishPx">照片中的圆直径 <span>px</span></label><input id="dishPx" type="number" min="1" step="any">
-        <div class="pair button-pair"><button id="pickCenter" class="secondary" disabled>点击图片选圆心</button><button id="pickEdge" class="secondary" disabled>点击图片选圆边</button></div>
-        <p class="muted" id="pickHint">青色圆是标定参考，请确认与培养皿匹配。</p>
-      </details>
-      <button id="saveCalibration" class="secondary wide" disabled>保存为固定拍摄标定</button>
-      <p class="muted" id="scaleInfo">请先上传照片并填写实际直径。</p>
+    <section class="panel calibration-panel" aria-label="培养皿尺寸">
+      <div class="fixed-dish-row"><h2><span class="step">03</span> 培养皿直径</h2><div class="fixed-dish-value">90 <small>mm</small><span class="tag saved">固定</span></div></div>
+      <p class="muted" id="scaleInfo">拍照或上传后自动标定。</p>
     </section>
     <section class="panel">
       <h2><span class="step">04</span> 取样参数</h2>
-      <div class="pair"><div><label for="diameter">取样圆直径 <span>mm</span></label><input id="diameter" type="number" min="0.001" step="any" value="3"></div><div><label for="gap">圆边缘间隙 <span>mm</span></label><input id="gap" type="number" min="0" step="any" value="0.5"></div></div>
-      <label for="defaultZ">统一取样深度 Z <span>mm</span></label><input id="defaultZ" type="number" min="0" step="any" value="1">
-      <p class="help">Z = 0 是培养基表面，向下为正。每个点可在表格中单独修改深度。</p>
-      <button id="generate" class="primary wide" disabled>生成取样排布</button>
-      <button id="applyDepth" class="secondary wide" disabled>应用统一深度</button>
+      <div class="pair"><div><label for="diameter">取样圆直径 <span>mm</span></label><input id="diameter" type="number" min="0.001" step="any" value="10"></div><div><label for="gap">圆边缘间隙 <span>mm</span></label><input id="gap" type="number" min="0" step="any" value="1"></div></div>
+      <p class="help">照片上传或拍照后自动生成排布。可修改直径、间隙后重新生成。Z 轴由 PLC 控制。</p>
+      <button id="generate" class="primary wide" disabled>重新生成取样排布</button>
       <p class="muted">编号沿菌丝外轮廓逐层向内。间隙设为 0 时允许相切；圆不能重叠或越出预测区域。</p>
     </section>
     <p class="sidebar-note" id="privacy">照片与规划结果保存在运行本工具的电脑上。</p>
   </aside>
   <section class="content">
-    <div class="title-row"><div><div class="eyebrow">IMAGE → REGION → SAMPLING POINTS</div><h1>从菌丝区域到取样位置</h1></div><span class="session-label">规划模式</span></div>
-    <div id="notice" class="notice" role="status" aria-live="polite">上传照片，确认标定，再生成取样排布。</div>
     <section class="summary-panel" aria-label="培养与识别数据总览">
       <div class="summary-heading"><h2>培养资料与识别结果</h2><span class="tag saved">本批共用</span></div>
       <section class="culture-overview" aria-label="本批培养资料">
@@ -91,26 +84,28 @@
       <div id="viewport" class="viewport"><div id="empty" class="empty"><span class="dish-icon">◎</span><strong>等待一张培养皿照片</strong><p>识别结果、标定圆和取样点将在这里显示。</p></div><canvas id="canvas" hidden aria-label="菌丝区域和取样圆预览"></canvas></div>
       <div class="viewer-foot"><div class="legend"><span><i class="green"></i>菌丝预测</span><span><i class="gold"></i>取样圆</span><span><i class="cyan"></i>标定圆</span><span><i style="background:#9aa8a1"></i>皿内边界</span></div><a id="maskDownload" class="text-link disabled">下载皿内标注 PNG</a></div>
     </section>
-    <div class="stats sampling-status"><div><span>取样点</span><strong id="pointCount">—</strong><small>个</small></div><div class="status-stat"><span>规划状态</span><strong id="planStatus">尚未生成</strong><small id="planDetails">X 向左为正 · Y 向上为正 · 原点在培养皿中心</small></div></div>
+    <div class="stats sampling-status"><div><span>取样点</span><strong id="pointCount">—</strong><small>个</small></div><div class="status-stat"><span>规划状态</span><strong id="planStatus">尚未生成</strong><small id="planDetails">X 向左为正 · Y 向上为正 · 原点为后台固定的螺丝中心</small></div></div>
     <section class="panel points-panel">
-      <div class="section-head"><div><h2>取样点坐标</h2><p class="help" id="pointHint">按编号从外层向内层取样；Z 留空时使用统一深度。</p></div><button id="saveDepths" class="secondary" disabled>保存深度修改</button></div>
+      <div class="section-head"><div><h2>取样点坐标</h2><p class="help" id="pointHint">按编号从外层向内层取样。Z 仅为旧版预览字段，不下发 PLC。</p></div><button id="saveDepths" class="secondary" disabled>保存预览深度</button></div>
       <div class="table-wrap"><table><thead><tr><th>编号</th><th>层次</th><th>X / mm</th><th>Y / mm</th><th>取样深度 Z / mm</th><th>深度设置</th></tr></thead><tbody id="pointRows"><tr><td colspan="6" class="table-empty">生成排布后显示坐标。</td></tr></tbody></table></div>
       <div class="export-row"><span>导出规划</span><a id="csvDownload" class="download disabled">XYZ 坐标 CSV</a><a id="layoutDownload" class="download disabled">排布图 SVG</a><a id="jsonDownload" class="download disabled">完整规划 JSON</a></div>
     </section>
+    <div id="notice" class="notice workflow-notice" role="status" aria-live="polite">上传或拍照后自动识别并生成排布；启动自动流程后才自动下发 PLC。</div>
     <section class="panel automatic-panel" aria-label="自动识别并下发">
-      <div class="section-head"><div><h2>自动识别并下发</h2><p class="help">先确认一次参考照片的标定和取样参数。可接收图片，也可由 PLC 到位信号自动触发相机拍照。</p></div><span id="automaticBadge" class="tag">未启动</span></div>
+      <div class="section-head"><div><h2>自动识别并下发</h2><p class="help">未启动时：照片自动排布，测试时手动写坐标。启动后：自动识别、排布并下发 PLC。</p></div><span id="automaticBadge" class="tag">未启动</span></div>
       <label for="automaticSource">图片来源</label><select id="automaticSource"><option value="received_images">接收上传或网页拍照的图片</option><option value="plc_camera">全自动 · PLC 到位后自动拍照</option></select>
-      <label for="automaticMode">处理模式</label><select id="automaticMode"><option value="coordinates_only">坐标覆盖测试 · 只写数据，不发送联动通知</option><option value="execute">联动执行 · 写坐标并发送完成信号</option></select>
+      <label for="automaticMode">处理模式</label><select id="automaticMode"><option value="execute">联动执行 · 写坐标并发送完成信号</option><option value="coordinates_only">坐标覆盖测试 · 只写数据，不发送联动通知</option></select>
       <div id="automaticCycleOptions" hidden><label for="automaticCycleTimeout">等待 PLC 完成本轮的最长时间 <span>秒</span></label><input id="automaticCycleTimeout" type="number" min="1" max="86400" step="1" value="1800"><p class="muted">4.2=True 表示到拍照位置并保持本轮有效；程序发完数据后置 4.0=True。PLC 完成全部动作后，将 4.0 和 4.2 都清为 False，再进入下一轮。同一个到位信号只拍一次。</p></div>
       <p class="automatic-flow" id="automaticFlow">接收照片 → 菌丝识别 → 划圈取点 → 覆盖 DB100 数量与坐标 → 等待下一张</p>
       <p id="automaticStatus" class="help" role="status" aria-live="polite">正在读取自动处理状态…</p>
       <p id="automaticSettings" class="muted"></p>
+      <p id="automaticStartHint" class="help" role="status" aria-live="polite"></p>
       <div class="plc-buttons"><button id="automaticSaveStart" class="primary" disabled>保存当前参数并启动自动处理</button><button id="automaticStartSaved" class="secondary" disabled>使用已保存参数启动</button><button id="automaticStop" class="secondary" disabled>停止自动处理</button></div>
       <p class="muted">全自动模式启动前先连接相机。启动后，后台监听 PLC 到位、拍照、识别、划圈和下发，不再逐张点击；手动拍照与上传暂时锁定。关闭网页不影响后台运行，保持程序运行即可。修改参数前先停止自动处理。</p>
       <div class="table-wrap"><table><thead><tr><th>照片</th><th>状态</th><th>点数</th><th>处理信息</th></tr></thead><tbody id="automaticJobs"><tr><td colspan="4" class="table-empty">还没有自动处理记录。</td></tr></tbody></table></div>
     </section>
     <section class="panel plc-panel" aria-label="PLC 坐标传输">
-      <div class="section-head"><div><h2>发送坐标到 PLC · DB100</h2><p class="help">1 mm = 100；每批最多 64 个点。只发送 X、Y 和数量，各点补偿值保留 PLC 原值。</p></div></div>
+      <div class="section-head"><div><h2>发送坐标到 PLC · DB100</h2><p class="help">1 mm = 10；每批最多 64 个点。只发送 X、Y 和数量，各点补偿值保留 PLC 原值。</p></div></div>
       <p id="plcStatus" class="help" role="status" aria-live="polite">生成取样排布后可直接“仅覆盖坐标（测试）”；联动发送前需先查看待发送坐标。</p>
       <div class="plc-buttons"><button id="plcPreview" class="secondary" disabled>查看待发送坐标</button><button id="plcTestWrite" class="primary" disabled>仅覆盖坐标（测试）</button><button id="plcSend" class="secondary" disabled>联动发送坐标到 PLC</button><button id="plcRead" class="secondary">读取 PLC 状态</button><button id="plcRelease" class="secondary" disabled>清除 PC 完成信号</button></div>
       <p class="muted">“仅覆盖坐标”会先清除 4.0，再覆盖数量和 X/Y，写完保持 4.0=False，不等 4.2，可连续覆盖测试。补偿字段保留原值。</p>
@@ -118,11 +113,7 @@
       <div class="table-wrap" id="plcPreviewTable" hidden><table><thead><tr><th>PLC 点位</th><th>X / mm</th><th>Y / mm</th><th>PLC X 整数</th><th>PLC Y 整数</th></tr></thead><tbody id="plcRows"></tbody></table></div>
       <p class="muted">写入并核对全部坐标和数量后，才置位“PC给完数据”。接收图片的联动模式把 4.2 作为取数反馈；PLC 到位拍照模式按上面的循环约定使用 4.2，并等待 PLC 在动作结束后复位两位信号。</p>
     </section>
-    <section class="panel device-panel" id="devicePanel">
-      <div class="section-head"><div><h2>取样动作预览</h2><p class="help">这里预览包含取样深度的完整指令。向 DB100 发送 X、Y 坐标，请使用上方传输按钮。</p></div><button id="previewActions" class="secondary" disabled>预览取样指令</button></div>
-      <pre id="actions" hidden></pre><a id="deviceDownload" class="text-link disabled">下载接口预览 JSON</a>
-    </section>
-    <p class="footnote">请对照原图检查菌丝识别结果。自动排布尝试多个方向和偏移，不保证全局最优。当前 PLC 传输保留培养皿中心坐标，不增加相机与移液枪的坐标变换。</p>
+    <p class="footnote">请对照原图检查菌丝识别结果。自动排布尝试多个方向和偏移，不保证全局最优。所有新坐标自动以后台固定的螺丝中心为原点，X 向左、Y 向上。相机、镜头、画幅改变后需重新标定；相机与移液枪的补偿仍由原有设置负责。</p>
   </section>
 </main>
 </body>

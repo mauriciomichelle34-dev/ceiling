@@ -6,6 +6,7 @@ import re
 from urllib.parse import unquote
 
 from auto_workflow import WorkflowError
+from image_limits import MAX_IMAGE_BYTES, IMAGE_CONTENT_TYPES
 
 
 def handle_automatic(handler):
@@ -21,10 +22,10 @@ def handle_automatic(handler):
         length = int(handler.headers.get('Content-Length', '0'))
         content_type = handler.headers.get('Content-Type', '').split(';')[0]
         if handler.path == '/api/automatic/images':
-            if content_type not in ('application/octet-stream', 'image/jpeg', 'image/png'):
-                return handler.reply(415, {'error': '请提交 JPG 或 PNG 图片字节。'})
-            if not 0 < length <= 40*1024*1024:
-                return handler.reply(413, {'error': '图片需在 40 MB 以内。'})
+            if content_type not in IMAGE_CONTENT_TYPES:
+                return handler.reply(415, {'error': '请提交 JPG、PNG 或 BMP 图片字节。'})
+            if not 0 < length <= MAX_IMAGE_BYTES:
+                return handler.reply(413, {'error': '图片需在 100 MB 以内。'})
             handler.connection.settimeout(120)
             raw = handler.rfile.read(length)
             if len(raw) != length:

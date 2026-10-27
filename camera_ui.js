@@ -11,6 +11,39 @@ function updateCameraControls() {
   $('cameraConnect').disabled = working || connected || !$('cameraSelect').value;
   $('cameraDisconnect').disabled = working || !connected;
   $('cameraCapture').disabled = working || !connected || !ready;
+  const lightWorking = working || (typeof automaticLocksPLC === 'function' && automaticLocksPLC());
+  for (const id of ['cameraLightEnabled','cameraLightBrightness','cameraLightSave','cameraLightProbe']) {
+    $(id).disabled = lightWorking || !cameraSnapshot?.light;
+  }
+}
+
+function renderCameraLight(light) {
+  if (!light) {
+    $('cameraLightStatus').textContent='当前服务未配置拍照补光，请确认新版程序已启动。';
+    return;
+  }
+  $('cameraLightEnabled').checked=light.enabled;
+  $('cameraLightBrightness').value=light.brightness;
+  let message=`${light.host} · CH${light.channel} · ${light.enabled ? '拍照补光已开启' : '拍照补光已关闭'} · 亮度 ${light.brightness}/255。`;
+  if (light.last_error) message=light.last_error;
+  else if (light.last_flash?.off_confirmed) message+=` 最近一次补光 ${light.last_flash.duration_ms} ms，已确认关灯。`;
+  else if (light.connected) message+=` 通信正常，当前亮度 ${light.actual_brightness}/255。`;
+  else message+=' 可点击“检查光源”核对通信，该操作不会开灯。';
+  $('cameraLightStatus').textContent=message;
+}
+
+async function cameraLightAction(action) {
+  if (cameraWorking || busy) return;
+  cameraWorking=true; updateCameraControls();
+  try {
+    const body=action==='settings' ? {enabled:$('cameraLightEnabled').checked,
+      brightness:Number($('cameraLightBrightness').value)} : {};
+    renderCamera(await cameraRequest(`light/${action}`,body));
+  } catch (error) {
+    $('cameraLightStatus').textContent=error.message; notice(error.message,true);
+  } finally {
+    cameraWorking=false; updateCameraControls();
+  }
 }
 
 async function cameraRequest(action, body = {}) {
@@ -52,7 +85,9 @@ function renderCamera(status) {
   if (status.last_error) $('cameraStatus').textContent=status.last_error;
   else if (status.last_capture?.processing_error) $('cameraStatus').textContent=status.last_capture.processing_error;
   if (status.last_capture) showCameraFrame(status.last_capture);
+  renderCameraLight(status.light);
   updateCameraControls();
+  if (typeof updateAutomaticControls === 'function') updateAutomaticControls();
 }
 
 async function cameraAction(action) {
@@ -74,8 +109,8 @@ async function cameraAction(action) {
         refreshAutomatic();
       } else {
         await addRecognizedPhoto(frame.processing.meta);
-        $('cameraStatus').textContent=`已拍照并识别：${frame.width} × ${frame.height}。`;
-        notice('已拍照并识别。请确认培养皿尺寸与标定；启动自动模式后，下一张照片会直接进入自动处理。');
+        $('cameraStatus').textContent=`已拍照、识别并自动排布：${frame.width} × ${frame.height}。`;
+        notice('已拍照并自动生成取样排布。测试时手动写坐标；启动自动流程后，新照片会自动下发 PLC。');
       }
     } else {
       const body=action==='connect' ? {device_id:$('cameraSelect').value} : {};
@@ -87,11 +122,19 @@ async function cameraAction(action) {
   } finally {
     if (action==='capture') { busy=false; controls(); }
     cameraWorking=false;
+    if (action==='capture') {
+      try {
+        const status=await cameraRequest('status');
+        cameraSnapshot=status; renderCameraLight(status.light);
+      } catch {}
+    }
     updateCameraControls();
   }
 }
 
 $('cameraSelect').addEventListener('change',updateCameraControls);
+$('cameraLightSave').addEventListener('click',()=>cameraLightAction('settings'));
+$('cameraLightProbe').addEventListener('click',()=>cameraLightAction('probe'));
 for (const [id,action] of [['cameraSearch','search'],['cameraConnect','connect'],
   ['cameraDisconnect','disconnect'],['cameraCapture','capture']]) $(id).addEventListener('click',()=>cameraAction(action));
 cameraRequest('status').then(renderCamera).catch(error=>{

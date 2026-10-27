@@ -64,7 +64,7 @@ async function plcAction(action) {
       }
       plcPreparedKey = plcPlanKey();
       $('plcPreviewTable').hidden = false;
-      $('plcPreviewInfo').textContent = `${data.count} 个点，按原编号顺序发送；精度 0.01 mm，按四舍五入转换。补偿字段和 Z 深度不写入。`;
+      $('plcPreviewInfo').textContent = `${data.count} 个点，相对固定螺丝原点，按原编号顺序发送；1 mm = ${data.units_per_mm}，精度 0.1 mm，按四舍五入转换。补偿字段和 Z 深度不写入。`;
       $('plcStatus').textContent = '坐标已准备好；可选择“仅覆盖坐标（测试）”或“联动发送坐标到 PLC”。';
     } else if (action === 'status') {
       showPLCStatus(data);

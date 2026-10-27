@@ -1,4 +1,4 @@
-"""Transfer sampling-plan XY values to the agreed DB100 layout (100 units/mm)."""
+"""Transfer sampling-plan XY values to the agreed DB100 layout (10 units/mm)."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,7 @@ import threading
 CAPACITY = 64
 POINT_START = 10
 POINT_SIZE = 10
-SCALE = 100
+SCALE = 10
 HERE = Path(__file__).resolve().parent
 
 
@@ -50,7 +50,7 @@ def scaled_coordinate(value, label):
         raise ValueError(f"{label} 必须是数值。")
     try:
         number = Decimal(str(value))
-        if not number.is_finite() or abs(number) > Decimal("21474836.48"):
+        if not number.is_finite() or abs(number) > Decimal(2**31) / SCALE:
             raise ValueError(f"{label} 超出 DInt 范围或不是有限数值。")
         scaled = int((number * SCALE).to_integral_value(rounding=ROUND_HALF_UP))
     except InvalidOperation:
@@ -63,6 +63,10 @@ def scaled_coordinate(value, label):
 def prepare_plan(plan):
     if not isinstance(plan, dict) or not isinstance(plan.get("points"), list):
         raise ValueError("请选择取样程序导出的完整规划 JSON（必须包含 points）。")
+    frame = plan.get('coordinate_frame')
+    if (not isinstance(frame, dict) or frame.get('xy_origin') != 'fixed_screw'
+            or frame.get('x_positive') != 'image_left' or frame.get('y_positive') != 'image_up'):
+        raise ValueError('只支持固定螺丝原点坐标；旧的培养皿中心规划已停用，请设置螺丝原点并重新生成。')
     points = plan["points"]
     if not 1 <= len(points) <= CAPACITY:
         raise ValueError(f"当前有 {len(points)} 个点；DB100 一次只能接收 1–64 个点。未发送任何数据。")
@@ -80,7 +84,8 @@ def prepare_plan(plan):
                      "x": x, "y": y, "x_offset": offset, "y_offset": offset + 4,
                      "compensation_offset": offset + 8})
     return {"plan_id": plan.get("plan_id"), "count": len(rows), "units_per_mm": SCALE,
-            "rounding": "四舍五入到 0.01 mm，负数按绝对值四舍五入",
+            "coordinate_frame": dict(frame),
+            "rounding": "四舍五入到 0.1 mm，负数按绝对值四舍五入",
             "compensation": "保留各点 Int 原值；不将 Z 深度写入补偿字段",
             "points": rows}
 

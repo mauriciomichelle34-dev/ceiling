@@ -22,6 +22,8 @@ from PIL import Image
 
 from sampling import make_plan, number, validate_calibration
 from plc_transfer import prepare_plan
+from fixed_origin import apply_origin, validate_origin, automatic_calibration, DISH_DIAMETER_MM
+from image_limits import MAX_IMAGE_BYTES, IMAGE_FORMATS
 
 
 def timestamp():
@@ -51,7 +53,7 @@ def validate_settings(value):
     width, height = value.get('image_width'), value.get('image_height')
     if any(type(v) is not int or not 1 <= v <= 25000000 for v in (width, height)) or width*height > 25000000:
         raise ValueError('请先上传参考照片并确认图片尺寸。')
-    calibration = validate_calibration(value.get('calibration'), width, height)
+    calibration = validate_calibration(value.get('calibration'), width, height, require_origin=True)
     mode = value.get('transfer_mode', 'execute')
     if mode not in ('execute', 'coordinates_only'):
         raise ValueError('请选择“坐标覆盖测试”或“联动执行”。')
@@ -66,14 +68,15 @@ def validate_settings(value):
             'cycle_timeout_s': number(value.get('cycle_timeout_s', 1800), '设备循环等待时间', minimum=1, maximum=86400),
             'diameter_mm': number(value.get('diameter_mm'), '取样圆直径', positive=True),
             'gap_mm': number(value.get('gap_mm'), '圆边缘间隙'),
-            'default_depth_mm': number(value.get('default_depth_mm'), '统一深度', maximum=1000),
+            'default_depth_mm': number(value.get('default_depth_mm', 0), '预览深度', maximum=1000),
             'plc_timeout_s': number(value.get('plc_timeout_s', 60), 'PLC 等待时间', minimum=1, maximum=600)}
 
 
 class AutomaticWorkflow:
-    def __init__(self, predictor, transfer, state_dir, camera=None):
+    def __init__(self, predictor, transfer, state_dir, camera=None, fixed_origin=None):
         self.predictor, self.transfer = predictor, transfer
         self.camera = camera
+        self.fixed_origin = validate_origin(fixed_origin) if fixed_origin is not None else None
         self.root = Path(state_dir)
         for name in ('jobs', 'images'):
             (self.root/name).mkdir(parents=True, exist_ok=True)
@@ -91,7 +94,14 @@ class AutomaticWorkflow:
         self.jobs = {}
         settings_path = self.root/'settings.json'
         if settings_path.is_file():
-            self.settings = validate_settings(json.loads(settings_path.read_text(encoding='utf-8')))
+            saved = json.loads(settings_path.read_text(encoding='utf-8'))
+            if self.fixed_origin or saved.get('calibration', {}).get('coordinate_origin'):
+                try:
+                    self.settings = validate_settings(self._configured_settings(saved))
+                except ValueError as exc:
+                    self.last_error = str(exc)
+            else:
+                self.last_error = '旧自动参数使用培养皿中心，已停用。请设置螺丝原点后重新保存参数。'
         for path in sorted((self.root/'jobs').glob('*.json')):
             job = json.loads(path.read_text(encoding='utf-8'))
             if job['state'] not in TERMINAL:
@@ -129,8 +139,15 @@ class AutomaticWorkflow:
                 raise WorkflowError('未找到这张图片的处理记录。')
             return self._public(self.jobs[identifier])
 
+    def _configured_settings(self, settings):
+        if self.fixed_origin and isinstance(settings, dict):
+            calibration = dict(settings.get('calibration') or {}, dish_diameter_mm=DISH_DIAMETER_MM)
+            return dict(settings, calibration=apply_origin(calibration, self.fixed_origin,
+                settings.get('image_width'), settings.get('image_height')))
+        return settings
+
     def start(self, settings=None):
-        validated = validate_settings(settings) if settings is not None else None
+        validated = validate_settings(self._configured_settings(settings)) if settings is not None else None
         with self.lock:
             if self.closed:
                 raise WorkflowError('自动处理服务已关闭。')
@@ -185,8 +202,8 @@ class AutomaticWorkflow:
     def submit(self, raw, filename, capture_id, *, source='received_images'):
         if not isinstance(capture_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,96}', capture_id):
             raise ValueError('每次拍摄需提供独立的 X-Capture-ID（字母、数字、下划线或短横线，最多 96 字符）。')
-        if not raw or len(raw) > 40*1024*1024:
-            raise ValueError('图片应为 40 MB 以内的 JPG 或 PNG。')
+        if not raw or len(raw) > MAX_IMAGE_BYTES:
+            raise ValueError('图片应为 100 MB 以内的 JPG、PNG 或 BMP。')
         job_id = hashlib.sha256(capture_id.encode()).hexdigest()[:32]
         digest = hashlib.sha256(raw).hexdigest()
         with self.lock:
@@ -245,8 +262,8 @@ class AutomaticWorkflow:
         self._set(job, 'recognizing', '正在自动识别菌丝区域。')
         raw = (self.root/'images'/f"{job['job_id']}.image").read_bytes()
         with Image.open(io.BytesIO(raw)) as image:
-            if image.format not in ('JPEG', 'PNG'):
-                raise ValueError('只接受 JPG 或 PNG 图片。')
+            if image.format not in IMAGE_FORMATS:
+                raise ValueError('只接受 JPG、PNG 或 BMP 图片。')
             if image.size != (settings['image_width'], settings['image_height']):
                 raise ValueError('新照片尺寸与保存的标定不一致；未下发坐标，请重新确认标定。')
         if not self.predictor.slots.acquire(timeout=10):
@@ -262,7 +279,16 @@ class AutomaticWorkflow:
             folder = self.predictor.result_root/meta['id']
             with Image.open(folder/'mask.png') as image:
                 mask = np.asarray(image)
-            plan = make_plan(mask, settings['calibration'], settings['diameter_mm'],
+            calibration = copy.deepcopy(settings['calibration'])
+            if self.fixed_origin:
+                calibration = automatic_calibration(meta, self.fixed_origin, mask.shape[1], mask.shape[0])
+            elif calibration.get('coordinate_origin'):
+                suggestion = meta.get('dish_suggestion')
+                if not isinstance(suggestion, dict):
+                    raise WorkflowError('本张照片没有培养皿定位结果，未生成或发送坐标。')
+                for key in ('center_x_px', 'center_y_px'):
+                    calibration[key] = suggestion[key]
+            plan = make_plan(mask, calibration, settings['diameter_mm'],
                              settings['gap_mm'], settings['default_depth_mm'])
             plan.update(prediction_id=meta['id'], source_name=meta['name'])
             destination = folder/'plans'/plan['plan_id']

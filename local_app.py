@@ -23,18 +23,21 @@ from dish import detect_dish, restrict_to_dish, DishNotFound
 from infrared import detect_infrared, exclude_infrared, InfraredDetectionError
 from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area, with_left_positive_x
 from device_interface import PreviewDevice
-from plc_transfer import PLCConfig, PLCTransfer
+from plc_transfer import PLCConfig, PLCTransfer, SCALE
+from fixed_origin import load_origin, automatic_calibration, DISH_DIAMETER_MM
+from image_limits import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, IMAGE_FORMATS
 from plc_http import handle_plc
 from auto_workflow import AutomaticWorkflow
 from automatic_http import handle_automatic
 from camera_service import CameraConfig, CameraService
+from light_service import LightConfig, LightService
 from camera_http import handle_camera, is_local as camera_request_is_local
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = HERE/'mycelium_v4_full16.pt'
-APP_VERSION = 19
-MAX_BYTES = 40*1024*1024
-Image.MAX_IMAGE_PIXELS = 25_000_000
+APP_VERSION = 26
+MAX_BYTES = MAX_IMAGE_BYTES
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
 
 def save_region_previews(mask, preview_size, folder, boundary=None):
@@ -64,7 +67,8 @@ def save_region_previews(mask, preview_size, folder, boundary=None):
 
 
 class Predictor:
-    def __init__(self, checkpoint_path, result_root=None):
+    def __init__(self, checkpoint_path, result_root=None, fixed_origin=None):
+        self.fixed_origin = fixed_origin
         torch.set_num_threads(4)
         cv2.setNumThreads(0)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -81,13 +85,16 @@ class Predictor:
 
     def predict(self, raw, name):
         with Image.open(io.BytesIO(raw)) as im:
-            if im.format not in {'JPEG', 'PNG'}:
-                raise ValueError('请选择 JPG 或 PNG 图片。')
-            if im.width*im.height > 25_000_000:
+            if im.format not in IMAGE_FORMATS:
+                raise ValueError('请选择 JPG、PNG 或 BMP 图片。')
+            if im.width*im.height > MAX_IMAGE_PIXELS:
                 raise ValueError('图片过大，请使用不超过 2500 万像素的图片。')
             source = im.convert('RGB')
         w, h = source.size
         boundary, dish_suggestion = detect_dish(source)
+        calibration = None
+        if getattr(self, 'fixed_origin', None):
+            calibration = automatic_calibration(dict(width=w, height=h, dish_suggestion=dish_suggestion), self.fixed_origin)
         probability = predict_probability(self.network, source, self.config, self.device)
         mask = (probability >= self.config['threshold']).astype(np.uint8)
         mask = restrict_to_dish(mask, boundary)
@@ -117,6 +124,8 @@ class Predictor:
                 'infrared': infrared_info,
                 'infrared_ignore_mask': f'/results/{identifier}/infrared_ignore.png',
                 'dish_boundary': boundary, 'dish_suggestion': dish_suggestion}
+        if calibration is not None:
+            meta['calibration'] = calibration
         (folder/'metadata.json').write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
         return meta
 
@@ -178,9 +187,17 @@ class Handler(BaseHTTPRequestHandler):
                                     'sampling_order': 'outer_boundary_layers',
                                     'sampling_planner': True, 'hardware_ready': False,
                                     'plc_transfer_available': True,
+                                    'plc_units_per_mm': SCALE,
+                                    'fixed_screw_origin_available': True,
+                                    'fixed_coordinate_origin': getattr(self.server, 'fixed_origin', None),
+                                    'fixed_dish_diameter_mm': DISH_DIAMETER_MM,
+                                    'automatic_dish_calibration': True,
+                                    'max_upload_bytes': MAX_IMAGE_BYTES,
+                                    'accepted_image_formats': sorted(IMAGE_FORMATS),
                                     'automatic_workflow_available': True,
                                     'coordinate_test_available': True,
                                     'camera_control_available': True,
+                                    'camera_light_available': True,
                                     'plc_camera_trigger_available': True,
                                     'plc_host': self.server.plc_transfer.config.host,
                                     'shared': bool(getattr(self.server, 'public_origin_file', None)),
@@ -253,12 +270,20 @@ class Handler(BaseHTTPRequestHandler):
                 if self.path == '/api/area':
                     with Image.open(folder/'mask.png') as image:
                         mask = np.asarray(image)
-                    return self.reply(200, measure_area(mask, payload.get('calibration')))
+                    calibration = payload.get('calibration')
+                    if getattr(self.server, 'fixed_origin', None):
+                        meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+                        calibration = automatic_calibration(meta, self.server.fixed_origin, mask.shape[1], mask.shape[0])
+                    return self.reply(200, measure_area(mask, calibration))
                 if self.path == '/api/plans/create':
                     with Image.open(folder/'mask.png') as image:
                         mask = np.asarray(image)
-                    plan = make_plan(mask, payload.get('calibration'), payload.get('diameter_mm'),
-                                     payload.get('gap_mm'), payload.get('default_depth_mm'))
+                    calibration = payload.get('calibration')
+                    if getattr(self.server, 'fixed_origin', None):
+                        meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+                        calibration = automatic_calibration(meta, self.server.fixed_origin, mask.shape[1], mask.shape[0])
+                    plan = make_plan(mask, calibration, payload.get('diameter_mm'),
+                                     payload.get('gap_mm'), payload.get('default_depth_mm', 0))
                     meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
                     plan.update(prediction_id=prediction_id, source_name=meta['name'])
                 else:
@@ -310,7 +335,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {'error': '无效的文件大小。'})
         if not 0 < length <= MAX_BYTES:
             self.close_connection = True
-            return self.reply(413, {'error': '请选择 40 MB 以内的图片。'})
+            return self.reply(413, {'error': '请选择 100 MB 以内的图片。'})
         if not self.server.predictor.slots.acquire(blocking=False):
             self.close_connection = True
             return self.reply(429, {'error': '排队人数已满，请稍后再试。'})
@@ -335,7 +360,7 @@ class Handler(BaseHTTPRequestHandler):
         except InfraredDetectionError as exc:
             self.reply(422, {'error': str(exc)})
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
-            self.reply(400, {'error': '无法读取图片。请使用 40 MB、2500 万像素以内的有效 JPG 或 PNG。'})
+            self.reply(400, {'error': '无法读取图片。请使用 100 MB、2500 万像素以内的有效 JPG、PNG 或 BMP。'})
         except Exception as exc:
             print(f'Prediction failed: {exc}', flush=True)
             self.reply(500, {'error': '处理失败，请查看启动窗口，或稍后重试。'})
@@ -355,8 +380,11 @@ def main():
     parser.add_argument('--plc-config', type=Path, default=HERE/'plc_config.json')
     parser.add_argument('--automatic-state-dir', type=Path)
     parser.add_argument('--camera-config', type=Path, default=HERE/'camera_config.json')
+    parser.add_argument('--light-config', type=Path, default=HERE/'light_config.json')
+    parser.add_argument('--origin-config', type=Path, default=HERE/'coordinate_origin.json')
     args = parser.parse_args()
     plc_transfer = PLCTransfer(PLCConfig.load(args.plc_config))
+    fixed_origin = load_origin(args.origin_config)
     if not args.model.is_file():
         parser.error(f'模型文件不存在：{args.model}。请按 README.md 准备权重，或用 --model 指定已有模型文件。')
     requested_hash = hashlib.sha256(args.model.read_bytes()).hexdigest()
@@ -367,7 +395,8 @@ def main():
         with urlopen(url+'/api/health', timeout=1) as response:
             running = json.load(response)
             if running.get('app') == 'mycelium-local':
-                if running.get('version') != APP_VERSION or running.get('model_sha256') != requested_hash:
+                if (running.get('version') != APP_VERSION or running.get('model_sha256') != requested_hash
+                        or running.get('fixed_coordinate_origin') != fixed_origin):
                     raise SystemExit('旧版服务或另一个模型还在运行。请先在旧启动窗口按 Ctrl+C 关闭，再运行本启动文件。')
                 print('Already running:', url, flush=True)
                 if args.open:
@@ -376,13 +405,16 @@ def main():
     except Exception:
         pass
     print('Loading model...', flush=True)
-    predictor = Predictor(args.model, args.result_root)
+    predictor = Predictor(args.model, args.result_root, fixed_origin=fixed_origin)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.predictor = predictor
     server.plc_transfer = plc_transfer
-    server.camera = CameraService(CameraConfig.load(args.camera_config), predictor.result_root/'camera')
+    server.fixed_origin = fixed_origin
+    server.camera = CameraService(CameraConfig.load(args.camera_config), predictor.result_root/'camera',
+                                  illumination=LightService(LightConfig.load(args.light_config), args.light_config))
     server.automatic = AutomaticWorkflow(predictor, plc_transfer,
-                                         args.automatic_state_dir or predictor.result_root/'automatic', camera=server.camera)
+                                         args.automatic_state_dir or predictor.result_root/'automatic', camera=server.camera,
+                                         fixed_origin=fixed_origin)
     server.public_origin_file = args.public_origin_file
     print('Ready:', url, flush=True)
     print('Keep this window open. Press Ctrl+C to stop.', flush=True)

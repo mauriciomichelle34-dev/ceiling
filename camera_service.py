@@ -1,5 +1,5 @@
 """MVS software-trigger camera control, independent of machine/PLC motion."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import ctypes
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -175,7 +175,7 @@ class MVSAdapter:
         return encoded.getvalue(), {'width':width, 'height':height, 'frame_number':int(info.nFrameNum),
                                     'pixel_type':int(info.enPixelType), 'monochrome':is_mono}
 
-    def capture(self):
+    def capture(self, illumination=None):
         if self.camera is None:
             raise CameraError('请先搜索并连接相机。')
         camera, sdk = self.camera, self.sdk
@@ -198,12 +198,17 @@ class MVSAdapter:
             check(camera.MV_CC_StartGrabbing(), '启动相机采集')
             grabbing = True
             check(camera.MV_CC_ClearImageBuffer(), '清除旧图像缓存')
-            check(camera.MV_CC_SetCommandValue('TriggerSoftware'), '软件拍照')
-            code = camera.MV_CC_GetImageBuffer(frame, self.config.capture_timeout_ms)
-            if code:
-                raise CameraError(f'等待照片失败或超时，MVS 错误码 0x{code & 0xffffffff:08X}。')
-            has_frame = True
-            return self._frame_to_png(frame)
+            with (illumination.exposure() if illumination else nullcontext()) as lighting:
+                check(camera.MV_CC_SetCommandValue('TriggerSoftware'), '软件拍照')
+                code = camera.MV_CC_GetImageBuffer(frame, self.config.capture_timeout_ms)
+                if code:
+                    raise CameraError(f'等待照片失败或超时，MVS 错误码 0x{code & 0xffffffff:08X}。')
+                has_frame = True
+            # Light is off before copying/converting the full-resolution image.
+            raw, details = self._frame_to_png(frame)
+            if lighting is not None:
+                details['illumination'] = dict(lighting)
+            return raw, details
         finally:
             original_error = sys.exc_info()[0] is not None
             cleanup = []
@@ -242,7 +247,7 @@ class MVSAdapter:
 
 
 class CameraService:
-    def __init__(self, config, capture_root, adapter_factory=MVSAdapter):
+    def __init__(self, config, capture_root, adapter_factory=MVSAdapter, illumination=None):
         self.config, self.root, self.factory = config, Path(capture_root), adapter_factory
         self.root.mkdir(parents=True,exist_ok=True)
         self.adapter = None
@@ -252,6 +257,7 @@ class CameraService:
         self.devices = []
         self.last_error = None
         self.last_capture = None
+        self.illumination = illumination
 
     @contextmanager
     def _operation(self):
@@ -277,7 +283,22 @@ class CameraService:
                 'sdk_version':adapter.version if adapter else None,
                 'connected':device is not None, 'device':dict(device) if device else None,
                 'devices':[dict(d) for d in self.devices], 'busy':self.operation.locked(),
-                'last_error':self.last_error, 'last_capture':self.last_capture}
+                'last_error':self.last_error, 'last_capture':self.last_capture,
+                'light':self.illumination.status() if self.illumination else None}
+
+    def configure_light(self, body):
+        with self._operation():
+            if self.illumination is None:
+                raise CameraError('当前服务未配置拍照补光。')
+            self.illumination.configure(body)
+        return self.status()
+
+    def probe_light(self):
+        with self._operation():
+            if self.illumination is None:
+                raise CameraError('当前服务未配置拍照补光。')
+            self.illumination.probe()
+        return self.status()
 
     def search(self):
         with self._operation():
@@ -320,7 +341,9 @@ class CameraService:
             else:
                 if self.device is None:
                     raise CameraError('请先搜索并连接相机。')
-                raw, details = self._adapter().capture()
+                adapter = self._adapter()
+                raw, details = (adapter.capture(illumination=self.illumination) if self.illumination
+                                else adapter.capture())
                 with Image.open(io.BytesIO(raw)) as image:
                     if image.format!='PNG' or image.size!=(details['width'],details['height']):
                         raise CameraError('SDK 返回的照片编码或尺寸不一致。')

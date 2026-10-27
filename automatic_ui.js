@@ -18,19 +18,39 @@ function plcCameraControls() {
   return automaticLocksPLC() && automaticSnapshot?.settings?.input_source === 'plc_camera';
 }
 
+function automaticReference() {
+  if (current) return {meta:current.meta, calibration:calibration(true), reused:false};
+  const frame = typeof cameraSnapshot === 'undefined' ? null : cameraSnapshot?.last_capture;
+  const meta = !frame?.processing_error && frame?.processing?.kind === 'analysis' ? frame.processing.meta : null;
+  if (!meta?.calibration || meta.calibration.dish_diameter_mm !== 90) {
+    throw Error('请先拍摄或上传一张识别成功的参考照片，再启动自动处理。');
+  }
+  return {meta, calibration:{...meta.calibration, coordinate_origin:coordinateOrigin(meta)}, reused:true};
+}
+
 function updateAutomaticControls() {
   let valid = false;
+  let reason = '';
+  let reference;
   try {
-    calibration(); numeric('diameter', '取样圆直径', true);
-    numeric('gap', '间隙'); numeric('defaultZ', '统一深度'); valid = true;
-  } catch {}
+    reference = automaticReference(); numeric('diameter', '取样圆直径', true);
+    numeric('gap', '间隙'); valid = true;
+  } catch (error) { reason = error.message; }
   const active = Boolean(automaticSnapshot?.active_job_id || automaticSnapshot?.camera_busy);
-  $('automaticSaveStart').disabled = busy || automaticEnabled || active || !valid;
-  $('automaticStartSaved').disabled = busy || automaticEnabled || active || !automaticSnapshot?.configured;
+  $('automaticSaveStart').disabled = !ready || busy || automaticEnabled || active || !valid;
+  $('automaticStartSaved').disabled = !ready || busy || automaticEnabled || active || !automaticSnapshot?.configured;
   $('automaticStop').disabled = !automaticEnabled && !active;
   $('automaticMode').disabled = busy || automaticEnabled || active || $('automaticSource').value === 'plc_camera';
   $('automaticSource').disabled = busy || automaticEnabled || active;
   $('automaticCycleTimeout').disabled = busy || automaticEnabled || active;
+  $('automaticStartHint').textContent = automaticEnabled ? '自动流程已启动。'
+    : active ? '当前任务尚未结束，请等待后再启动。'
+    : busy ? '正在处理照片，请等待完成。'
+    : !ready ? '正在等待识别服务及固定原点加载。'
+    : !valid ? reason
+    : reference.reused ? `可复用最近一次识别成功的相机照片（${reference.meta.width} × ${reference.meta.height}）；点击启动后才监听 PLC 并下发。`
+    : '参数已就绪，点击启动后才开始自动处理。';
+  $('automaticSaveStart').title = $('automaticSaveStart').disabled ? $('automaticStartHint').textContent : '';
 }
 
 async function automaticRequest(action, body = {}) {
@@ -56,8 +76,8 @@ function renderAutomatic(data) {
   $('automaticBadge').classList.toggle('saved', data.enabled);
   const settings = data.settings;
   $('automaticSettings').textContent = settings
-    ? `${plcCamera ? 'PLC 到位自动拍照' : mode === 'coordinates_only' ? '坐标覆盖测试' : '联动执行'}；固定参数：${settings.image_width} × ${settings.image_height} px；培养皿 ${settings.calibration.dish_diameter_mm} mm；取样圆 ${settings.diameter_mm} mm；间隙 ${settings.gap_mm} mm。`
-    : '首次使用：先上传参考照片，填写培养皿实际直径并确认标定，再保存当前参数。';
+    ? `${plcCamera ? 'PLC 到位自动拍照' : mode === 'coordinates_only' ? '坐标覆盖测试' : '联动执行'}；固定参数：${settings.image_width} × ${settings.image_height} px；培养皿 ${settings.calibration.dish_diameter_mm} mm；取样圆 ${settings.diameter_mm} mm；间隙 ${settings.gap_mm} mm。${settings.calibration.coordinate_origin ? '后台自动使用固定螺丝原点；每张照片重新定位皿中心。' : '旧参数使用培养皿中心，请设置螺丝原点后重新保存参数。'}`
+    : '首次使用：拍照或上传参考照片后，设置取样参数并启动自动处理。';
   const active = data.jobs.find(job => job.job_id === data.active_job_id);
   const latest = active || data.jobs[0];
   if (active?.plc_status) showPLCStatus(active.plc_status);
@@ -89,14 +109,12 @@ function renderAutomatic(data) {
 
 async function displayAutomaticResult(job) {
   if (!job.meta || automaticLoaded.has(job.job_id)) return;
-  const settings = job.applied_settings || automaticSnapshot.settings, c = settings.calibration;
+  const settings = job.applied_settings || automaticSnapshot.settings;
   const [original, region, regionOutline] = await Promise.all([
     loadImage(job.meta.original), loadImage(job.meta.region), loadImage(job.meta.region_outline)]);
   const photo = {meta:job.meta, original, region, regionOutline,
-    glowCanvas:document.createElement('canvas'), plan:job.plan || null, overrides:{}, profileUsed:true,
-    fields:{centerX:String(c.center_x_px), centerY:String(c.center_y_px), dishPx:String(c.dish_diameter_px),
-      dishMm:String(c.dish_diameter_mm), diameter:String(settings.diameter_mm), gap:String(settings.gap_mm),
-      defaultZ:String(settings.default_depth_mm)}};
+    glowCanvas:document.createElement('canvas'), plan:job.plan || null, overrides:{},
+    fields:{diameter:String(settings.diameter_mm), gap:String(settings.gap_mm)}};
   photos.push(photo);
   const option = document.createElement('option'); option.value = String(photos.length-1);
   option.textContent = job.filename; $('photoSelect').append(option);
@@ -128,6 +146,8 @@ async function refreshAutomatic() {
 async function startAutomatic(useSaved) {
   if (busy) return;
   try {
+    if (!ready) throw Error('请等待识别服务及固定原点加载。');
+    const reference = useSaved ? null : automaticReference();
     const source = $('automaticSource').value;
     if (source === 'plc_camera') {
       const response = await fetch('/api/health'), capabilities = await response.json();
@@ -141,9 +161,9 @@ async function startAutomatic(useSaved) {
     }
     let body = useSaved ? {settings:{...automaticSnapshot.settings, transfer_mode:$('automaticMode').value,
       input_source:source, cycle_timeout_s:numeric('automaticCycleTimeout','设备循环等待时间',true)}} : {};
-    if (!useSaved) body.settings = {image_width:current.meta.width, image_height:current.meta.height,
-      calibration:calibration(), diameter_mm:numeric('diameter', '取样圆直径', true),
-      gap_mm:numeric('gap', '间隙'), default_depth_mm:numeric('defaultZ', '统一深度'), plc_timeout_s:60,
+    if (!useSaved) body.settings = {image_width:reference.meta.width, image_height:reference.meta.height,
+      calibration:reference.calibration, diameter_mm:numeric('diameter', '取样圆直径', true),
+      gap_mm:numeric('gap', '间隙'), plc_timeout_s:60,
       transfer_mode:$('automaticMode').value, input_source:source,
       cycle_timeout_s:numeric('automaticCycleTimeout','设备循环等待时间',true)};
     renderAutomatic(await automaticRequest('start', body));
@@ -160,7 +180,7 @@ async function uploadAutomatic(files) {
   busy = true; uploading = true; controls();
   try {
     for (const file of files) {
-      if (file.size > 40*1024*1024 || !/\.(jpe?g|png)$/i.test(file.name)) throw Error('请选择 40 MB 以内的 JPG 或 PNG。');
+      if (file.size > maxImageBytes || !/\.(jpe?g|png|bmp)$/i.test(file.name)) throw Error('请选择 100 MB 以内的 JPG、PNG 或 BMP。');
       const response = await fetch('/api/automatic/images', {method:'POST', headers:{
         'Content-Type':'application/octet-stream', 'X-PLC-Request':'1',
         'X-File-Name':encodeURIComponent(file.name), 'X-Capture-ID':crypto.randomUUID()}, body:file});

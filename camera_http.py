@@ -5,6 +5,7 @@ import ipaddress
 import json
 
 from camera_service import CameraError
+from light_service import LightError
 
 
 def is_local(handler):
@@ -37,6 +38,12 @@ def handle_camera(handler):
             raise CameraError('PLC 到位自动拍照正在管理相机，请先停止自动处理并等待当前操作结束。')
         if path=='/api/camera/status':
             result = camera.status()
+        elif path in ('/api/camera/light/settings', '/api/camera/light/probe'):
+            # Serialize with start/stop so a queued capture cannot race a settings change.
+            with workflow.lock:
+                if workflow.enabled or workflow.active_id or workflow.camera_busy:
+                    raise CameraError('请先停止自动处理并等待当前操作结束，再调整或检查补光。')
+                result = camera.configure_light(body) if path.endswith('/settings') else camera.probe_light()
         elif path=='/api/camera/search':
             result = camera.search()
         elif path=='/api/camera/connect':
@@ -75,7 +82,7 @@ def handle_camera(handler):
         else:
             return handler.reply(404, {'error':'未找到相机接口。'})
         return handler.reply(200,result)
-    except (CameraError, OSError) as exc:
+    except (CameraError, LightError, OSError) as exc:
         return handler.reply(409, {'error':str(exc)})
     except ValueError as exc:
         return handler.reply(400, {'error':str(exc)})

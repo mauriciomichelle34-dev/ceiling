@@ -5,6 +5,7 @@ import re
 
 from plc_transfer import TransferError, prepare_plan
 from sampling import with_left_positive_x
+from fixed_origin import origin_for_image, DISH_DIAMETER_MM
 
 
 def handle_plc(handler):
@@ -47,6 +48,13 @@ def handle_plc(handler):
             if not path.is_file():
                 return handler.reply(404, {"error": "取样规划不存在，请重新生成。"})
             plan = with_left_positive_x(json.loads(path.read_text(encoding="utf-8")))
+            if getattr(handler.server, 'fixed_origin', None):
+                c = plan.get('calibration', {})
+                expected = origin_for_image(handler.server.fixed_origin, c.get('image_width'), c.get('image_height'))
+                if c.get('coordinate_origin') != expected:
+                    raise ValueError('该规划的原点与后台固定螺丝位置不同，请重新生成取样排布。')
+                if c.get('dish_diameter_mm') != DISH_DIAMETER_MM:
+                    raise ValueError('该规划不是固定 90 mm 培养皿，请重新自动标定并生成。')
             if handler.path.endswith('preview'):
                 result = prepare_plan(plan)
             elif handler.path.endswith('test-write'):

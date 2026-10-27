@@ -1,11 +1,11 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const photos = [];
-let current = null, ready = false, busy = false, uploading = false, picking = null, selected = null;
-const profileKey = 'mycelium-fixed-calibration-v1';
+let current = null, ready = false, busy = false, uploading = false, selected = null;
 const geometryFields = ['center_x_px', 'center_y_px', 'dish_diameter_px', 'dish_diameter_mm'];
-const calibrationInputs = ['centerX', 'centerY', 'dishPx', 'dishMm'];
-const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload', 'deviceDownload'];
+let backendOrigin = null;
+let maxImageBytes = 100 * 1024 * 1024;
+const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload'];
 const cultureKey = 'mycelium-batch-culture-v1';
 const cultureInputs = ['speciesName', 'cultureStartedAt'];
 const defaultCulture = {speciesName: '', cultureStartedAt: ''};
@@ -145,34 +145,36 @@ function numeric(id, label, positive = false) {
   }
   return value;
 }
-function calibration() {
-  if (!current) throw Error('请先上传照片。');
-  const c = {
-    center_x_px: numeric('centerX', '圆心横坐标'), center_y_px: numeric('centerY', '圆心纵坐标'),
-    dish_diameter_px: numeric('dishPx', '图中圆直径', true), dish_diameter_mm: numeric('dishMm', '培养皿实际直径', true)
-  };
-  const r = c.dish_diameter_px / 2, m = current.meta;
-  if (c.center_x_px - r < -.5 || c.center_y_px - r < -.5 || c.center_x_px + r > m.width - .5 || c.center_y_px + r > m.height - .5) {
-    throw Error('标定圆超出图片，请调整圆心和直径。');
+function coordinateOrigin(meta = current?.meta) {
+  if (!meta) throw Error('请先上传照片。');
+  if (!backendOrigin) throw Error('后台固定原点尚未加载，请刷新网页。');
+  if (meta.width !== backendOrigin.image_width || meta.height !== backendOrigin.image_height) {
+    throw Error(`照片尺寸与后台原点不匹配，请使用 ${backendOrigin.image_width} × ${backendOrigin.image_height} px 的原相机画幅。`);
   }
-  return c;
+  return {...backendOrigin};
+}
+function calibration() {
+  if (!current) throw Error('拍照或上传后自动标定。');
+  const c = current.meta.calibration;
+  if (!c || c.dish_diameter_mm !== 90) throw Error('请重新上传照片，使用后台 90 mm 自动标定。');
+  return {...c, coordinate_origin:coordinateOrigin()};
 }
 function capture() {
   if (!current) return;
-  current.fields = Object.fromEntries([...calibrationInputs, 'diameter', 'gap', 'defaultZ'].map(id => [id, $(id).value]));
+  current.fields = Object.fromEntries(['diameter', 'gap'].map(id => [id, $(id).value]));
 }
 function geometryDirty() {
   if (!current?.plan) return false;
   try {
-    const c = calibration(), p = current.plan;
+    const c = calibration(true), p = current.plan;
     return geometryFields.some(key => Math.abs(c[key] - p.calibration[key]) > 1e-8) ||
+      JSON.stringify(c.coordinate_origin) !== JSON.stringify(p.calibration.coordinate_origin) ||
       numeric('diameter', '取样直径', true) !== p.diameter_mm || numeric('gap', '间隙') !== p.gap_mm;
   } catch { return true; }
 }
 function depthDirty() {
   if (!current?.plan) return false;
   try {
-    if (numeric('defaultZ', '统一深度') !== current.plan.default_depth_mm) return true;
     return current.plan.points.some(p => {
       const raw = current.overrides[String(p.id)];
       return (raw !== undefined) !== p.depth_overridden || (raw !== undefined && Number(raw) !== p.z_mm);
@@ -193,16 +195,14 @@ function controls() {
   const has = Boolean(current), plan = current?.plan, geometric = geometryDirty(), depths = depthDirty();
   let validCalibration = false;
   try { calibration(); validCalibration = true; } catch {}
+  let validOrigin = false;
+  try { coordinateOrigin(); validOrigin = true; } catch {}
   $('files').disabled = busy || !ready || (typeof plcCameraControls === 'function' && plcCameraControls());
   $('photoSelect').disabled = busy;
-  for (const id of ['pickCenter', 'pickEdge']) $(id).disabled = !has || busy || automaticLock;
-  $('saveCalibration').disabled = !validCalibration || busy || automaticLock;
-  $('generate').disabled = !has || !ready || busy || !validCalibration || automaticLock;
+  $('generate').disabled = !has || !ready || busy || !validCalibration || !validOrigin || automaticLock;
   $('generate').textContent = busy ? '正在处理…' : plan ? '重新生成取样排布' : '生成取样排布';
   $('saveDepths').disabled = !plan || !depths || geometric || busy || automaticLock;
-  $('applyDepth').disabled = !plan || geometric || busy || automaticLock;
-  $('previewActions').disabled = !plan || geometric || depths || busy;
-  for (const id of [...calibrationInputs, 'diameter', 'gap', 'defaultZ']) $(id).disabled = busy || automaticLock;
+  for (const id of ['diameter', 'gap']) $(id).disabled = busy || automaticLock;
   for (const el of $('pointRows').querySelectorAll('input,button')) el.disabled = busy || automaticLock;
   if (plan) {
     $('pointCount').textContent = plan.count;
@@ -212,13 +212,12 @@ function controls() {
   } else {
     $('pointCount').textContent = '—'; $('coverage').textContent = '—';
     $('planStatus').textContent = busy ? '处理中' : '尚未生成';
-    $('planDetails').textContent = 'X 向左为正 · Y 向上为正 · 原点在培养皿中心';
+    $('planDetails').textContent = 'X 向左为正 · Y 向上为正 · 原点为固定螺丝中心';
   }
   const downloadable = Boolean(plan && !geometric && !depths && !busy);
-  const files = ['points.csv', 'layout.svg', 'plan.json', 'preview.json'];
+  const files = ['points.csv', 'layout.svg', 'plan.json'];
   exportIds.forEach((id, i) => link(id, plan ? planUrl(files[i]) : null, downloadable));
   link('maskDownload', current?.meta.mask, has && !busy);
-  if (geometric || depths) $('actions').hidden = true;
   updateScale();
   updateArea();
   if (typeof updateAutomaticControls === 'function') updateAutomaticControls();
@@ -228,15 +227,8 @@ function controls() {
 function updateScale() {
   try {
     const c = calibration();
-    $('scaleInfo').textContent = `1 像素 = ${(c.dish_diameter_mm / c.dish_diameter_px).toFixed(5)} mm · 确认青色标定圆后保存。`;
-    const saved = current?.profileUsed;
-    $('calibrationBadge').textContent = saved ? '已复用标定' : '已填写';
-    $('calibrationBadge').classList.toggle('saved', Boolean(saved));
-  } catch (error) {
-    $('scaleInfo').textContent = current ? error.message : '请先上传照片并填写实际直径。';
-    $('calibrationBadge').textContent = '待确认';
-    $('calibrationBadge').classList.remove('saved');
-  }
+    $('scaleInfo').textContent = `已自动标定 · ${c.mm_per_pixel.toFixed(5)} mm/px`;
+  } catch (error) { $('scaleInfo').textContent = error.message; }
 }
 async function request(url, body, binary = false, name = '') {
   const headers = binary ? {'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(name)} : {'Content-Type': 'application/json'};
@@ -251,45 +243,37 @@ function loadImage(url) {
     const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(Error('图片预览加载失败，请重新上传。')); image.src = url;
   });
 }
-function getProfile(meta) {
-  try {
-    const p = JSON.parse(localStorage.getItem(profileKey));
-    return p && p.image_width === meta.width && p.image_height === meta.height ? p : null;
-  } catch { return null; }
-}
 async function addRecognizedPhoto(meta) {
   const [original, region, regionOutline] = await Promise.all([
     loadImage(meta.original),loadImage(meta.region),loadImage(meta.region_outline)]);
-  const profile = getProfile(meta), c = profile || meta.dish_suggestion;
   const photo = {meta, original, region, regionOutline, glowCanvas:document.createElement('canvas'),
-    plan:null, overrides:{}, profileUsed:Boolean(profile),
-    fields:{centerX:String(c.center_x_px), centerY:String(c.center_y_px), dishPx:String(c.dish_diameter_px),
-      dishMm:profile ? String(c.dish_diameter_mm) : '', diameter:$('diameter').value,
-      gap:$('gap').value, defaultZ:$('defaultZ').value}};
+    plan:null, overrides:{},
+    fields:{diameter:$('diameter').value, gap:$('gap').value}};
   photos.push(photo);
   const option=document.createElement('option'); option.value=String(photos.length-1); option.textContent=meta.name;
   $('photoSelect').append(option); showPhoto(photo);
+  await createPlanForCurrentPhoto();
 }
 async function upload(files) {
   if (typeof automaticEnabled !== 'undefined' && automaticEnabled) return uploadAutomatic(files);
   if (busy || !ready || !files.length) return;
-  capture(); busy = true; uploading = true; picking = null; controls(); draw();
+  capture(); busy = true; uploading = true; controls(); draw();
   const errors = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i]; notice(`正在识别 ${i + 1} / ${files.length}：${file.name}`);
     try {
-      if (file.size > 40 * 1024 * 1024) throw Error('单张图片不能超过 40 MB。');
-      if (!/\.(jpe?g|png)$/i.test(file.name)) throw Error('请选择 JPG 或 PNG 图片。');
+      if (file.size > maxImageBytes) throw Error('单张图片不能超过 100 MB。');
+      if (!/\.(jpe?g|png|bmp)$/i.test(file.name)) throw Error('请选择 JPG、PNG 或 BMP 图片。');
       const meta = await request('/api/predict', file, true, file.name);
       await addRecognizedPhoto(meta);
     } catch (error) { errors.push(`${file.name}：${error.message}`); }
   }
   busy = false; uploading = false; $('files').value = ''; controls(); draw();
   if (errors.length) notice(errors.join('；'), true);
-  else notice(current.profileUsed ? '已自动排除皿外区域并复用尺寸标定。检查白色内边界与青色标定圆后，生成排布。' : '已自动定位培养皿内边缘，皿外区域已排除。请填写实际直径，并检查白色内边界与青色标定圆。');
+  else notice(current.plan?.count ? `已自动识别并生成 ${current.plan.count} 个取样点。测试时可手动写坐标；正式运行请启动自动流程。` : '识别已完成，当前参数没有可用取样点，请调整直径或间隙后重新生成。', !current.plan?.count);
 }
 function showPhoto(photo) {
-  current = photo; picking = null; selected = null;
+  current = photo; selected = null;
   for (const [id, value] of Object.entries(photo.fields)) $(id).value = value;
   $('photoSelect').value = String(photos.indexOf(photo));
   $('photoSelect').hidden = photos.length < 2; $('photoSelectLabel').hidden = photos.length < 2;
@@ -301,8 +285,7 @@ function showPhoto(photo) {
   } else if (photo.meta.infrared) {
     $('scopeInfo').textContent += ' 本图未检测到符合条件的红外亮点，请核对原图。';
   }
-  $('empty').hidden = true; $('canvas').hidden = false; $('actions').hidden = true;
-  $('pickHint').textContent = '青色圆是标定参考，请确认与培养皿匹配。';
+  $('empty').hidden = true; $('canvas').hidden = false;
   renderTable(); controls(); draw();
 }
 function renderTable() {
@@ -320,10 +303,10 @@ function renderTable() {
     }
     const depthCell = document.createElement('td'), container = document.createElement('div'); container.className = 'depth-cell';
     const input = document.createElement('input'); input.type = 'number'; input.min = '0'; input.max = '1000'; input.step = 'any'; input.dataset.point = String(p.id);
-    input.setAttribute('aria-label', `点 ${p.id} 的取样深度`); input.placeholder = $('defaultZ').value; input.value = current.overrides[String(p.id)] ?? '';
-    const reset = document.createElement('button'); reset.className = 'reset'; reset.textContent = '恢复统一'; reset.type = 'button';
+    input.setAttribute('aria-label', `点 ${p.id} 的取样深度`); input.placeholder = String(previewDepth()); input.value = current.overrides[String(p.id)] ?? '';
+    const reset = document.createElement('button'); reset.className = 'reset'; reset.textContent = '恢复默认'; reset.type = 'button';
     const modeCell = document.createElement('td'), mode = document.createElement('span'); mode.className = 'mode'; modeCell.append(mode);
-    const updateMode = () => { const override = current.overrides[String(p.id)] !== undefined; mode.textContent = override ? '单独设置' : '使用统一值'; mode.classList.toggle('override', override); };
+    const updateMode = () => { const override = current.overrides[String(p.id)] !== undefined; mode.textContent = override ? '预览自定义' : '默认预览值'; mode.classList.toggle('override', override); };
     input.addEventListener('input', () => {
       if (input.value.trim() === '') delete current.overrides[String(p.id)]; else current.overrides[String(p.id)] = input.value;
       updateMode(); controls();
@@ -339,7 +322,7 @@ function selectPoint(id, scroll = true) {
   for (const row of $('pointRows').querySelectorAll('tr[data-id]')) row.classList.toggle('selected', Number(row.dataset.id) === id);
   if (scroll) $('pointRows').querySelector(`tr[data-id="${id}"]`)?.scrollIntoView({behavior: 'smooth', block: 'nearest'});
   const p = current.plan.points.find(item => item.id === id);
-  $('pointHint').textContent = `选中点 ${id} · 第 ${p.layer ?? '—'} 层：X ${p.x_mm.toFixed(3)} / Y ${p.y_mm.toFixed(3)} mm。Z 留空时使用统一深度。`;
+  $('pointHint').textContent = `选中点 ${id} · 第 ${p.layer ?? '—'} 层：X ${p.x_mm.toFixed(3)} / Y ${p.y_mm.toFixed(3)} mm。Z 仅为旧版预览字段，不下发 PLC。`;
   draw();
 }
 function drawRegion(ctx, m, unit) {
@@ -390,10 +373,9 @@ function draw() {
   if (canvas.height !== height) canvas.height = height;
   const fit = Math.max(180, $('viewport').clientWidth - 34), z = Number($('zoom').value);
   canvas.style.width = `${fit * z}px`; canvas.style.height = `${fit * z * m.height / m.width}px`;
-  canvas.classList.toggle('picking', Boolean(picking));
   const ctx = canvas.getContext('2d'); ctx.drawImage(current.original, 0, 0, canvas.width, canvas.height);
   ctx.save(); ctx.scale(canvas.width / m.width, canvas.height / m.height);
-  const unit = m.width / canvas.width, cx = Number($('centerX').value), cy = Number($('centerY').value), d = Number($('dishPx').value);
+  const unit = m.width / canvas.width, c = m.calibration, cx = c?.center_x_px, cy = c?.center_y_px, d = c?.dish_diameter_px;
   drawRegion(ctx, m, unit);
   const boundary = m.dish_boundary;
   if (boundary) {
@@ -403,9 +385,17 @@ function draw() {
   if (Number.isFinite(cx) && Number.isFinite(cy) && d > 0) {
     ctx.strokeStyle = '#63d2d8'; ctx.lineWidth = 1.5 * unit; ctx.setLineDash([8 * unit, 5 * unit]);
     ctx.beginPath(); ctx.arc(cx, cy, d / 2, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]);
-    const a = d * .095; ctx.beginPath(); ctx.moveTo(cx - a * .2, cy); ctx.lineTo(cx + a, cy); ctx.moveTo(cx, cy + a * .2); ctx.lineTo(cx, cy - a); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(cx + a - 6 * unit, cy - 4 * unit); ctx.lineTo(cx + a, cy); ctx.lineTo(cx + a - 6 * unit, cy + 4 * unit); ctx.moveTo(cx - 4 * unit, cy - a + 6 * unit); ctx.lineTo(cx, cy - a); ctx.lineTo(cx + 4 * unit, cy - a + 6 * unit); ctx.stroke();
-    ctx.fillStyle = '#94e1e3'; ctx.font = `${12 * unit}px sans-serif`; ctx.fillText('X', cx + a + 5 * unit, cy); ctx.fillText('Y', cx + 5 * unit, cy - a); ctx.fillText('0', cx + 5 * unit, cy + 14 * unit);
+  }
+  let origin; try { origin = coordinateOrigin(); } catch {}
+  if (origin) {
+    const ox = origin.x_px, oy = origin.y_px, a = 65*unit;
+    ctx.strokeStyle = '#ff9dce'; ctx.fillStyle = '#ffb6dc'; ctx.lineWidth = 2*unit;
+    ctx.beginPath(); ctx.moveTo(ox+8*unit,oy); ctx.lineTo(ox-a,oy); ctx.moveTo(ox,oy+8*unit); ctx.lineTo(ox,oy-a);
+    ctx.moveTo(ox-a+7*unit,oy-4*unit); ctx.lineTo(ox-a,oy); ctx.lineTo(ox-a+7*unit,oy+4*unit);
+    ctx.moveTo(ox-4*unit,oy-a+7*unit); ctx.lineTo(ox,oy-a); ctx.lineTo(ox+4*unit,oy-a+7*unit); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ox,oy,4*unit,0,Math.PI*2); ctx.stroke();
+    ctx.font = `${12*unit}px sans-serif`; ctx.textAlign='left'; ctx.textBaseline='alphabetic';
+    ctx.fillText('X+',ox-a-22*unit,oy+4*unit); ctx.fillText('Y+',ox+6*unit,oy-a); ctx.fillText('0 螺丝',ox+7*unit,oy+17*unit);
   }
   const plan = current.plan;
   if (plan) {
@@ -424,23 +414,34 @@ function draw() {
   }
   ctx.restore();
 }
+function previewDepth() { return current?.plan?.default_depth_mm ?? 0; }
+async function createPlanForCurrentPhoto() {
+  const photo = current;
+  const c = calibration(), diameter = numeric('diameter', '取样直径', true), gap = numeric('gap', '间隙');
+  capture(); notice('正在自动生成取样排布…');
+  const plan = await request('/api/plans/create', {prediction_id:photo.meta.id, calibration:c,
+    diameter_mm:diameter, gap_mm:gap});
+  photo.plan = plan; photo.overrides = {};
+  if (photo === current) {
+    selected = null;
+    $('pointHint').textContent = '按编号从外层向内层取样。Z 仅为旧版预览字段，不下发 PLC。';
+    renderTable(); controls(); draw();
+  }
+  notice(plan.count ? `已自动生成 ${plan.count} 个取样点，共 ${plan.sampling_order.layer_count} 层。` : '没有满足大小、间隙和边界约束的取样圆，请调整参数后重新生成。', !plan.count);
+  return plan;
+}
 async function generate() {
   if (busy) return;
-  try {
-    const c = calibration(), diameter = numeric('diameter', '取样直径', true), gap = numeric('gap', '间隙'), depth = numeric('defaultZ', '统一深度');
-    capture(); busy = true; picking = null; controls(); notice('正在尝试不同方向与偏移，计算完整落在菌丝区域内的取样圆…');
-    const plan = await request('/api/plans/create', {prediction_id: current.meta.id, calibration: c, diameter_mm: diameter, gap_mm: gap, default_depth_mm: depth});
-    current.plan = plan; current.overrides = {}; selected = null; $('actions').hidden = true;
-    $('pointHint').textContent = '按编号从外层向内层取样；Z 留空时使用统一深度。'; renderTable();
-    notice(plan.count ? `已保存 ${plan.count} 个取样点，编号从外圈逐层向内，共 ${plan.sampling_order.layer_count} 层。` : '没有满足大小、间隙和边界约束的取样圆，请检查参数和菌丝区域。', !plan.count);
-  } catch (error) { notice(error.message, true); }
+  busy = true; controls();
+  try { await createPlanForCurrentPhoto(); }
+  catch (error) { notice(error.message, true); }
   finally { busy = false; controls(); draw(); }
 }
 async function saveDepths() {
   if (busy || !current?.plan || geometryDirty()) return;
   try {
-    const depth = numeric('defaultZ', '统一深度'), overrides = {};
-    if (depth > 1000) throw Error('统一深度不能超过 1000 mm。');
+    const depth = previewDepth(), overrides = {};
+    if (depth > 1000) throw Error('预览深度不能超过 1000 mm。');
     for (const [id, raw] of Object.entries(current.overrides)) {
       const value = Number(raw);
       if (!Number.isFinite(value) || value < 0 || value > 1000) throw Error(`点 ${id} 的深度应为 0–1000 mm。`);
@@ -449,7 +450,7 @@ async function saveDepths() {
     capture(); busy = true; controls();
     current.plan = await request('/api/plans/update', {prediction_id: current.meta.id, plan_id: current.plan.plan_id, default_depth_mm: depth, overrides});
     current.overrides = Object.fromEntries(current.plan.points.filter(p => p.depth_overridden).map(p => [String(p.id), String(p.z_mm)]));
-    renderTable(); notice('深度已保存；单独设置的点保持自己的深度，其余点使用统一值。');
+    renderTable(); notice('预览深度已保存；该字段不下发 PLC。');
   } catch (error) { notice(error.message, true); }
   finally { busy = false; controls(); draw(); }
 }
@@ -458,32 +459,12 @@ for (const kind of ['dragenter', 'dragover']) $('drop').addEventListener(kind, e
 for (const kind of ['dragleave', 'drop']) $('drop').addEventListener(kind, e => { e.preventDefault(); $('drop').classList.remove('over'); });
 $('drop').addEventListener('drop', e => upload([...e.dataTransfer.files]));
 $('photoSelect').addEventListener('change', () => { capture(); showPhoto(photos[Number($('photoSelect').value)]); notice('已切换照片；请检查当前标定和参数。'); });
-for (const id of [...calibrationInputs, 'diameter', 'gap', 'defaultZ']) $(id).addEventListener('input', () => {
-  if (calibrationInputs.includes(id) && current) current.profileUsed = false;
+for (const id of ['diameter', 'gap']) $(id).addEventListener('input', () => {
   capture(); controls(); draw();
-  if (id === 'defaultZ') for (const input of $('pointRows').querySelectorAll('input')) input.placeholder = $('defaultZ').value;
 });
-$('saveCalibration').addEventListener('click', () => {
-  try {
-    const c = calibration();
-    localStorage.setItem(profileKey, JSON.stringify({...c, image_width: current.meta.width, image_height: current.meta.height}));
-    current.profileUsed = true; controls(); notice('固定拍摄标定已保存在这个浏览器中。同尺寸且培养皿位置、大小一致的照片会复用。');
-  } catch (error) { notice(error.message, true); }
-});
-function beginPick(mode) {
-  picking = picking === mode ? null : mode;
-  $('pickHint').textContent = picking === 'center' ? '请在右侧图片上点击培养皿圆心。' : picking === 'edge' ? '请点击培养皿的圆边，直径按到圆心的距离计算。' : '青色圆是标定参考，请确认与培养皿匹配。'; draw();
-}
-$('pickCenter').addEventListener('click', () => beginPick('center'));
-$('pickEdge').addEventListener('click', () => beginPick('edge'));
 $('canvas').addEventListener('click', event => {
   if (busy || !current) return;
   const rect = $('canvas').getBoundingClientRect(), x = (event.clientX - rect.left) / rect.width * current.meta.width, y = (event.clientY - rect.top) / rect.height * current.meta.height;
-  if (picking) {
-    if (picking === 'center') { $('centerX').value = x.toFixed(3); $('centerY').value = y.toFixed(3); }
-    else $('dishPx').value = (2 * Math.hypot(x - Number($('centerX').value), y - Number($('centerY').value))).toFixed(3);
-    picking = null; current.profileUsed = false; capture(); controls(); draw(); $('pickHint').textContent = '已调整标定圆，请核对后保存。'; return;
-  }
   if (current.plan) {
     const p = current.plan.points.find(p => Math.hypot(x - p.image_x_px, y - p.image_y_px) <= current.plan.radius_px);
     if (p) selectPoint(p.id);
@@ -499,18 +480,10 @@ motionPreference.addEventListener('change', () => {
 });
 $('generate').addEventListener('click', generate);
 $('saveDepths').addEventListener('click', saveDepths);
-$('applyDepth').addEventListener('click', saveDepths);
-$('previewActions').addEventListener('click', async () => {
-  try {
-    const response = await fetch(planUrl('preview.json')); if (!response.ok) throw Error('指令预览读取失败。');
-    const data = await response.json(); $('actions').textContent = JSON.stringify(data, null, 2); $('actions').hidden = false;
-    notice('这里显示取样位置与深度指令。发送 X、Y 到 PLC，请使用上方“发送当前坐标到 PLC”按钮。');
-  } catch (error) { notice(error.message, true); }
-});
 async function health() {
   try {
     const response = await fetch('/api/health'); if (!response.ok) throw Error(); const data = await response.json();
-    if (!data.original_image_inference || !data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); ready = Boolean(data.ready); $('health').textContent = `模型已连接 · ${data.device}`;
+    if (!data.automatic_dish_calibration || data.fixed_dish_diameter_mm !== 90 || !data.original_image_inference || !data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); backendOrigin = data.fixed_coordinate_origin; maxImageBytes = data.max_upload_bytes || maxImageBytes; ready = Boolean(data.ready && backendOrigin); $('health').textContent = `模型已连接 · ${data.device}`;
     $('statusDot').classList.toggle('ready', ready);
     if (data.shared) $('privacy').textContent = '无密码临时共享：照片经 Cloudflare 转到服务提供者电脑处理并保存。';
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }

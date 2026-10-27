@@ -34,7 +34,7 @@ def number(value, label, minimum=0, maximum=10000, positive=False):
     return result
 
 
-def validate_calibration(data, width, height):
+def validate_calibration(data, width, height, *, require_origin=False):
     if not isinstance(data, dict):
         raise ValueError('请先完成固定拍摄标定。')
     cx = number(data.get('center_x_px'), '皿中心 X', maximum=width-1)
@@ -44,9 +44,22 @@ def validate_calibration(data, width, height):
     radius = diameter/2
     if cx-radius < -.5 or cy-radius < -.5 or cx+radius > width-.5 or cy+radius > height-.5:
         raise ValueError('标定圆超出图片，请核对皿中心和直径，使用完整俯视照片。')
-    return dict(center_x_px=cx, center_y_px=cy, dish_diameter_px=diameter,
+    result = dict(center_x_px=cx, center_y_px=cy, dish_diameter_px=diameter,
                 dish_diameter_mm=mm, mm_per_pixel=mm/diameter,
                 image_width=width, image_height=height)
+    if require_origin and 'coordinate_origin' not in data:
+        raise ValueError('请先点选并保存固定螺丝原点；培养皿中心坐标方案已停用。')
+    if 'coordinate_origin' in data:
+        origin = data['coordinate_origin']
+        if not isinstance(origin, dict) or origin.get('kind') != 'fixed_screw':
+            raise ValueError('坐标原点必须为已点选的固定螺丝中心。')
+        if origin.get('image_width') != width or origin.get('image_height') != height:
+            raise ValueError('螺丝原点的照片尺寸不匹配，请重新点选并保存。')
+        result['coordinate_origin'] = dict(kind='fixed_screw',
+            x_px=number(origin.get('x_px'), '螺丝原点 X', maximum=width-1),
+            y_px=number(origin.get('y_px'), '螺丝原点 Y', maximum=height-1),
+            image_width=width, image_height=height)
+    return result
 
 
 def measure_area(mask, calibration):
@@ -276,7 +289,7 @@ def outer_layer_order(mask, points, radius, pitch):
 def make_plan(mask, calibration, diameter_mm, gap_mm, default_depth_mm):
     if mask.ndim != 2:
         raise ValueError('标注图必须为单通道。')
-    calibration = validate_calibration(calibration, mask.shape[1], mask.shape[0])
+    calibration = validate_calibration(calibration, mask.shape[1], mask.shape[0], require_origin=True)
     y, x = np.ogrid[:mask.shape[0], :mask.shape[1]]
     inside = ((x-calibration['center_x_px'])**2 + (y-calibration['center_y_px'])**2
               <= (calibration['dish_diameter_px']/2)**2)
@@ -290,15 +303,18 @@ def make_plan(mask, calibration, diameter_mm, gap_mm, default_depth_mm):
     indices, layers, edge_depths = outer_layer_order(mask, points, radius,
                                                    (diameter+gap)/calibration['mm_per_pixel'])
     c = calibration
+    origin = c['coordinate_origin']
+    ox, oy = origin['x_px'], origin['y_px']
     items = [{'id': i+1, 'image_x_px': float(points[k, 0]), 'image_y_px': float(points[k, 1]),
               'layer': int(layers[k]), 'outer_edge_depth_mm': float(edge_depths[k]*c['mm_per_pixel']),
-              'x_mm': (c['center_x_px']-points[k, 0])*c['mm_per_pixel'],
-              'y_mm': (c['center_y_px']-points[k, 1])*c['mm_per_pixel'], 'z_mm': depth,
+              'x_mm': (ox-points[k, 0])*c['mm_per_pixel'],
+              'y_mm': (oy-points[k, 1])*c['mm_per_pixel'], 'z_mm': depth,
               'depth_overridden': False} for i, k in enumerate(indices)]
     return {'schema_version': 1, 'plan_id': uuid.uuid4().hex,
             'created_at': datetime.now(timezone.utc).isoformat(),
             'units': 'mm', 'calibration': c,
-            'coordinate_frame': {'xy_origin': 'dish_center', 'x_positive': 'image_left',
+            'coordinate_frame': {'xy_origin': 'fixed_screw',
+                                 'origin_x_px': ox, 'origin_y_px': oy, 'x_positive': 'image_left',
                                  'y_positive': 'image_up', 'z_zero': 'medium_surface', 'z_positive': 'downward_depth'},
             'diameter_mm': diameter, 'gap_mm': gap, 'default_depth_mm': depth, 'radius_px': radius,
             'count': len(items), 'points': items, 'hardware_ready': False,
@@ -313,7 +329,7 @@ def make_plan(mask, calibration, diameter_mm, gap_mm, default_depth_mm):
             'notes': ['圆边界保守避开背景像素；满足约束不代表模型分割一定正确。',
                       '编号沿菌丝实际外轮廓逐层向内；内部孔洞不作为最外层。',
                       '启发式搜索尽量增加圆数量，不保证全局最优。',
-                      'XYZ 是样本坐标和深度，尚未转换为设备坐标。']}
+                      'XY 相对固定螺丝中心，X 向左、Y 向上；Z 为培养基向下的取样深度。']}
 
 
 def with_left_positive_x(plan):

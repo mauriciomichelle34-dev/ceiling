@@ -1,0 +1,9 @@
+{
+  "host": "192.168.6.15",
+  "port": 9232,
+  "channel": 1,
+  "enabled": true,
+  "brightness": 170,
+  "warmup_ms": 100,
+  "timeout_seconds": 2.0
+}
