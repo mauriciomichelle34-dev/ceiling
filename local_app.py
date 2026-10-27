@@ -25,17 +25,18 @@ from sampling import make_plan, with_depths, csv_bytes, layout_svg, measure_area
 from device_interface import PreviewDevice
 from plc_transfer import PLCConfig, PLCTransfer, SCALE
 from fixed_origin import load_origin, automatic_calibration, DISH_DIAMETER_MM
+from screw_origin import AutomaticScrewOrigin, ScrewConfig, ScrewDetectionError, origin_from_metadata
 from image_limits import MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, IMAGE_FORMATS
 from plc_http import handle_plc
 from auto_workflow import AutomaticWorkflow
 from automatic_http import handle_automatic
 from camera_service import CameraConfig, CameraService
-from light_service import LightConfig, LightService
+from light_service import LightConfig, LightService, LightError
 from camera_http import handle_camera, is_local as camera_request_is_local
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MODEL = HERE/'mycelium_v4_full16.pt'
-APP_VERSION = 26
+APP_VERSION = 28
 MAX_BYTES = MAX_IMAGE_BYTES
 Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
 
@@ -67,8 +68,9 @@ def save_region_previews(mask, preview_size, folder, boundary=None):
 
 
 class Predictor:
-    def __init__(self, checkpoint_path, result_root=None, fixed_origin=None):
+    def __init__(self, checkpoint_path, result_root=None, fixed_origin=None, screw_origin=None):
         self.fixed_origin = fixed_origin
+        self.screw_origin = screw_origin
         torch.set_num_threads(4)
         cv2.setNumThreads(0)
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -93,7 +95,11 @@ class Predictor:
         w, h = source.size
         boundary, dish_suggestion = detect_dish(source)
         calibration = None
-        if getattr(self, 'fixed_origin', None):
+        screw_record = None
+        if getattr(self, 'screw_origin', None):
+            screw_record = self.screw_origin.resolve(source, boundary)
+            calibration = automatic_calibration(dict(width=w,height=h,dish_suggestion=dish_suggestion), screw_record['origin'])
+        elif getattr(self, 'fixed_origin', None):
             calibration = automatic_calibration(dict(width=w, height=h, dish_suggestion=dish_suggestion), self.fixed_origin)
         probability = predict_probability(self.network, source, self.config, self.device)
         mask = (probability >= self.config['threshold']).astype(np.uint8)
@@ -126,6 +132,8 @@ class Predictor:
                 'dish_boundary': boundary, 'dish_suggestion': dish_suggestion}
         if calibration is not None:
             meta['calibration'] = calibration
+        if screw_record is not None:
+            meta['screw_origin'] = screw_record
         (folder/'metadata.json').write_text(json.dumps(meta, ensure_ascii=False), encoding='utf-8')
         return meta
 
@@ -190,6 +198,9 @@ class Handler(BaseHTTPRequestHandler):
                                     'plc_units_per_mm': SCALE,
                                     'fixed_screw_origin_available': True,
                                     'fixed_coordinate_origin': getattr(self.server, 'fixed_origin', None),
+                                    'coordinate_origin_mode': 'auto_screw' if getattr(self.server,'screw_origin',None) else 'fixed_screw',
+                                    'coordinate_image_frame': self.server.screw_origin.config.frame() if getattr(self.server,'screw_origin',None) else None,
+                                    'screw_origin_status': self.server.screw_origin.status() if getattr(self.server,'screw_origin',None) else None,
                                     'fixed_dish_diameter_mm': DISH_DIAMETER_MM,
                                     'automatic_dish_calibration': True,
                                     'max_upload_bytes': MAX_IMAGE_BYTES,
@@ -271,7 +282,10 @@ class Handler(BaseHTTPRequestHandler):
                     with Image.open(folder/'mask.png') as image:
                         mask = np.asarray(image)
                     calibration = payload.get('calibration')
-                    if getattr(self.server, 'fixed_origin', None):
+                    if getattr(self.server,'screw_origin',None):
+                        meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+                        calibration = automatic_calibration(meta, origin_from_metadata(meta), mask.shape[1], mask.shape[0])
+                    elif getattr(self.server, 'fixed_origin', None):
                         meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
                         calibration = automatic_calibration(meta, self.server.fixed_origin, mask.shape[1], mask.shape[0])
                     return self.reply(200, measure_area(mask, calibration))
@@ -279,13 +293,18 @@ class Handler(BaseHTTPRequestHandler):
                     with Image.open(folder/'mask.png') as image:
                         mask = np.asarray(image)
                     calibration = payload.get('calibration')
-                    if getattr(self.server, 'fixed_origin', None):
+                    if getattr(self.server,'screw_origin',None):
+                        meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+                        calibration = automatic_calibration(meta, origin_from_metadata(meta), mask.shape[1], mask.shape[0])
+                    elif getattr(self.server, 'fixed_origin', None):
                         meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
                         calibration = automatic_calibration(meta, self.server.fixed_origin, mask.shape[1], mask.shape[0])
                     plan = make_plan(mask, calibration, payload.get('diameter_mm'),
                                      payload.get('gap_mm'), payload.get('default_depth_mm', 0))
                     meta = json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
                     plan.update(prediction_id=prediction_id, source_name=meta['name'])
+                    if meta.get('screw_origin'):
+                        plan['screw_origin'] = meta['screw_origin']
                 else:
                     plan_id = payload.get('plan_id', '')
                     if not isinstance(plan_id, str) or not re.fullmatch('[0-9a-f]{32}', plan_id):
@@ -359,6 +378,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(422, {'error': str(exc)})
         except InfraredDetectionError as exc:
             self.reply(422, {'error': str(exc)})
+        except ScrewDetectionError as exc:
+            self.reply(422, {'error': str(exc)})
         except (ValueError, UnidentifiedImageError, Image.DecompressionBombError):
             self.reply(400, {'error': '无法读取图片。请使用 100 MB、2500 万像素以内的有效 JPG、PNG 或 BMP。'})
         except Exception as exc:
@@ -381,10 +402,13 @@ def main():
     parser.add_argument('--automatic-state-dir', type=Path)
     parser.add_argument('--camera-config', type=Path, default=HERE/'camera_config.json')
     parser.add_argument('--light-config', type=Path, default=HERE/'light_config.json')
-    parser.add_argument('--origin-config', type=Path, default=HERE/'coordinate_origin.json')
+    parser.add_argument('--origin-config', type=Path, default=HERE/'coordinate_origin.json',
+                        help='兼容旧启动参数；自动定位模式不读取该固定像素文件')
+    parser.add_argument('--screw-config', type=Path, default=HERE/'screw_detection.json')
     args = parser.parse_args()
     plc_transfer = PLCTransfer(PLCConfig.load(args.plc_config))
-    fixed_origin = load_origin(args.origin_config)
+    fixed_origin = None  # The old fixed-pixel file is no longer used in production.
+    screw_config = ScrewConfig.load(args.screw_config)
     if not args.model.is_file():
         parser.error(f'模型文件不存在：{args.model}。请按 README.md 准备权重，或用 --model 指定已有模型文件。')
     requested_hash = hashlib.sha256(args.model.read_bytes()).hexdigest()
@@ -405,13 +429,22 @@ def main():
     except Exception:
         pass
     print('Loading model...', flush=True)
-    predictor = Predictor(args.model, args.result_root, fixed_origin=fixed_origin)
+    result_root = args.result_root or HERE/'predictions'
+    screw_origin = AutomaticScrewOrigin(screw_config, result_root/'screw_origin_state.json')
+    predictor = Predictor(args.model, result_root, screw_origin=screw_origin)
     server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
     server.predictor = predictor
     server.plc_transfer = plc_transfer
     server.fixed_origin = fixed_origin
+    server.screw_origin = screw_origin
     server.camera = CameraService(CameraConfig.load(args.camera_config), predictor.result_root/'camera',
                                   illumination=LightService(LightConfig.load(args.light_config), args.light_config))
+    try:
+        server.camera.initialize_light()
+        print('CH1 idle OFF acknowledged.', flush=True)
+    except LightError as exc:
+        # Keep the website available to report the fault; capture retries OFF first.
+        print(f'Cannot confirm idle light OFF: {exc}', flush=True)
     server.automatic = AutomaticWorkflow(predictor, plc_transfer,
                                          args.automatic_state_dir or predictor.result_root/'automatic', camera=server.camera,
                                          fixed_origin=fixed_origin)
@@ -426,8 +459,10 @@ def main():
         pass
     finally:
         server.automatic.close()
-        server.camera.close()
-        server.server_close()
+        try:
+            server.camera.close()
+        finally:
+            server.server_close()
 
 
 if __name__ == '__main__':

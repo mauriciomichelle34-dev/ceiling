@@ -4,6 +4,7 @@ const photos = [];
 let current = null, ready = false, busy = false, uploading = false, selected = null;
 const geometryFields = ['center_x_px', 'center_y_px', 'dish_diameter_px', 'dish_diameter_mm'];
 let backendOrigin = null;
+let originMode = 'fixed_screw';
 let maxImageBytes = 100 * 1024 * 1024;
 const exportIds = ['csvDownload', 'layoutDownload', 'jsonDownload'];
 const cultureKey = 'mycelium-batch-culture-v1';
@@ -147,9 +148,19 @@ function numeric(id, label, positive = false) {
 }
 function coordinateOrigin(meta = current?.meta) {
   if (!meta) throw Error('请先上传照片。');
-  if (!backendOrigin) throw Error('后台固定原点尚未加载，请刷新网页。');
+  if (!backendOrigin) throw Error('后台原点配置尚未加载，请刷新网页。');
   if (meta.width !== backendOrigin.image_width || meta.height !== backendOrigin.image_height) {
     throw Error(`照片尺寸与后台原点不匹配，请使用 ${backendOrigin.image_width} × ${backendOrigin.image_height} px 的原相机画幅。`);
+  }
+  if (originMode === 'auto_screw') {
+    const record = meta.screw_origin, origin = record?.origin;
+    if (!['detected','reused_last'].includes(record?.status) || origin?.kind !== 'fixed_screw'
+      || origin.image_width !== meta.width || origin.image_height !== meta.height
+      || !Number.isFinite(origin.x_px) || !Number.isFinite(origin.y_px)
+      || origin.x_px < 0 || origin.x_px >= meta.width || origin.y_px < 0 || origin.y_px >= meta.height) {
+      throw Error('本张照片没有有效的自动螺丝原点，请重新拍照或上传识别。');
+    }
+    return {...origin};
   }
   return {...backendOrigin};
 }
@@ -212,7 +223,7 @@ function controls() {
   } else {
     $('pointCount').textContent = '—'; $('coverage').textContent = '—';
     $('planStatus').textContent = busy ? '处理中' : '尚未生成';
-    $('planDetails').textContent = 'X 向左为正 · Y 向上为正 · 原点为固定螺丝中心';
+    $('planDetails').textContent = 'X 向左为正 · Y 向上为正 · 原点为右下角银色螺丝中心';
   }
   const downloadable = Boolean(plan && !geometric && !depths && !busy);
   const files = ['points.csv', 'layout.svg', 'plan.json'];
@@ -229,6 +240,17 @@ function updateScale() {
     const c = calibration();
     $('scaleInfo').textContent = `已自动标定 · ${c.mm_per_pixel.toFixed(5)} mm/px`;
   } catch (error) { $('scaleInfo').textContent = error.message; }
+  const record=current?.meta.screw_origin;
+  if (record) {
+    const point=`(${record.origin.x_px.toFixed(2)}, ${record.origin.y_px.toFixed(2)}) px`;
+    $('screwOriginStatus').textContent=record.status==='reused_last'
+      ? `本张螺丝定位失败，沿用上一次成功位置 ${point}。原因：${record.reason}`
+      : `已自动定位银色螺丝中心 ${point}；本张照片使用此原点。`;
+    $('screwOriginStatus').dataset.status=record.status;
+  } else {
+    $('screwOriginStatus').textContent='每张照片自动定位右下角银色螺丝。定位失败时沿用同画幅最近一次成功位置；首次无记录则停止生成坐标。';
+    $('screwOriginStatus').dataset.status='waiting';
+  }
 }
 async function request(url, body, binary = false, name = '') {
   const headers = binary ? {'Content-Type': 'application/octet-stream', 'X-File-Name': encodeURIComponent(name)} : {'Content-Type': 'application/json'};
@@ -483,7 +505,7 @@ $('saveDepths').addEventListener('click', saveDepths);
 async function health() {
   try {
     const response = await fetch('/api/health'); if (!response.ok) throw Error(); const data = await response.json();
-    if (!data.automatic_dish_calibration || data.fixed_dish_diameter_mm !== 90 || !data.original_image_inference || !data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); backendOrigin = data.fixed_coordinate_origin; maxImageBytes = data.max_upload_bytes || maxImageBytes; ready = Boolean(data.ready && backendOrigin); $('health').textContent = `模型已连接 · ${data.device}`;
+    if (!data.automatic_dish_calibration || data.fixed_dish_diameter_mm !== 90 || !data.original_image_inference || !data.dish_interior_only || !data.region_animation || !data.area_measurement || !data.sampling_planner || data.sampling_order !== 'outer_boundary_layers') throw Error(); originMode=data.coordinate_origin_mode || 'fixed_screw'; backendOrigin = data.coordinate_image_frame || data.fixed_coordinate_origin; maxImageBytes = data.max_upload_bytes || maxImageBytes; ready = Boolean(data.ready && backendOrigin); $('health').textContent = `模型已连接 · ${data.device}`;
     $('statusDot').classList.toggle('ready', ready);
     if (data.shared) $('privacy').textContent = '无密码临时共享：照片经 Cloudflare 转到服务提供者电脑处理并保存。';
   } catch { ready = false; $('health').textContent = '服务未连接'; $('statusDot').classList.remove('ready'); notice('请重新运行 Start_Local_App.cmd，再刷新网页；如旧服务还在运行，请先关闭旧启动窗口。', true); }

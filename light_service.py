@@ -85,6 +85,7 @@ class LightService:
         self.actual_brightness = None
         self.off_confirmed = None
         self.last_flash = None
+        self.last_off = None
 
     def status(self):
         with self.state_lock:
@@ -92,6 +93,7 @@ class LightService:
                     'busy': self.operation.locked(), 'last_error': self.last_error,
                     'actual_brightness': self.actual_brightness,
                     'off_confirmed': self.off_confirmed,
+                    'last_off': dict(self.last_off) if self.last_off else None,
                     'last_flash': dict(self.last_flash) if self.last_flash else None}
 
     @contextmanager
@@ -113,6 +115,8 @@ class LightService:
             raise ValueError('请提供拍照补光开关及亮度。')
         with self._operation():
             updated = replace(self.config, **body)
+            if not updated.enabled:
+                self._turn_off_locked('disabled')
             if self.config_path:
                 temp = self.config_path.with_suffix('.tmp')
                 temp.write_text(json.dumps(asdict(updated), ensure_ascii=False, indent=2), encoding='utf-8')
@@ -120,6 +124,26 @@ class LightService:
             with self.state_lock:
                 self.config = updated
                 self.last_error = None
+        return self.status()
+
+    def _turn_off_locked(self, reason):
+        # A previous acknowledgement is historical, not a live hardware reading.
+        with self.state_lock:
+            self.off_confirmed = False
+        connection = self._connect()
+        try:
+            self._ensure_off(connection)
+            with self.state_lock:
+                self.off_confirmed = True
+                self.connected, self.last_error = True, None
+                self.last_off = {'reason': reason, 'confirmed_at': datetime.now(timezone.utc).isoformat()}
+        finally:
+            connection.close()
+
+    def turn_off(self, reason='idle'):
+        """Clear a latched ON state even when flash illumination is disabled."""
+        with self._operation():
+            self._turn_off_locked(reason)
         return self.status()
 
     def _connect(self):
@@ -226,6 +250,7 @@ class LightService:
                         with self.state_lock:
                             self.off_confirmed = True
                             self.last_flash = dict(record)
+                            self.last_off = {'reason': 'capture', 'confirmed_at': datetime.now(timezone.utc).isoformat()}
                     with self.state_lock:
                         self.connected, self.last_error = True, None
                 finally:

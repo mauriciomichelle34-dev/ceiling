@@ -23,6 +23,7 @@ from PIL import Image
 from sampling import make_plan, number, validate_calibration
 from plc_transfer import prepare_plan
 from fixed_origin import apply_origin, validate_origin, automatic_calibration, DISH_DIAMETER_MM
+from screw_origin import origin_from_metadata
 from image_limits import MAX_IMAGE_BYTES, IMAGE_FORMATS
 
 
@@ -280,7 +281,9 @@ class AutomaticWorkflow:
             with Image.open(folder/'mask.png') as image:
                 mask = np.asarray(image)
             calibration = copy.deepcopy(settings['calibration'])
-            if self.fixed_origin:
+            if getattr(self.predictor,'screw_origin',None):
+                calibration = automatic_calibration(meta, origin_from_metadata(meta), mask.shape[1], mask.shape[0])
+            elif self.fixed_origin:
                 calibration = automatic_calibration(meta, self.fixed_origin, mask.shape[1], mask.shape[0])
             elif calibration.get('coordinate_origin'):
                 suggestion = meta.get('dish_suggestion')
@@ -291,6 +294,8 @@ class AutomaticWorkflow:
             plan = make_plan(mask, calibration, settings['diameter_mm'],
                              settings['gap_mm'], settings['default_depth_mm'])
             plan.update(prediction_id=meta['id'], source_name=meta['name'])
+            if meta.get('screw_origin'):
+                plan['screw_origin']=copy.deepcopy(meta['screw_origin'])
             destination = folder/'plans'/plan['plan_id']
             destination.mkdir(parents=True, exist_ok=False)
             atomic_json(destination/'plan.json', plan)

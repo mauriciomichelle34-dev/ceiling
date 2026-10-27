@@ -24,9 +24,11 @@ function renderCameraLight(light) {
   }
   $('cameraLightEnabled').checked=light.enabled;
   $('cameraLightBrightness').value=light.brightness;
-  let message=`${light.host} · CH${light.channel} · ${light.enabled ? '拍照补光已开启' : '拍照补光已关闭'} · 亮度 ${light.brightness}/255。`;
+  let message=`${light.host} · CH${light.channel} · ${light.enabled ? '拍照补光已启用（平时关灯）' : '拍照补光已停用'} · 亮度 ${light.brightness}/255。`;
   if (light.last_error) message=light.last_error;
-  else if (light.last_flash?.off_confirmed) message+=` 最近一次补光 ${light.last_flash.duration_ms} ms，已确认关灯。`;
+  else if (light.off_confirmed === false) message+=' 尚未确认关灯，请检查现场灯光。';
+  else if (light.last_off) message+=' 最近一次关灯指令已确认。';
+  else if (light.last_flash?.off_confirmed) message+=` 最近一次补光 ${light.last_flash.duration_ms} ms，关灯指令已确认。`;
   else if (light.connected) message+=` 通信正常，当前亮度 ${light.actual_brightness}/255。`;
   else message+=' 可点击“检查光源”核对通信，该操作不会开灯。';
   $('cameraLightStatus').textContent=message;

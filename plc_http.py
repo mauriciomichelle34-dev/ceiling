@@ -6,6 +6,7 @@ import re
 from plc_transfer import TransferError, prepare_plan
 from sampling import with_left_positive_x
 from fixed_origin import origin_for_image, DISH_DIAMETER_MM
+from screw_origin import origin_from_metadata
 
 
 def handle_plc(handler):
@@ -48,7 +49,15 @@ def handle_plc(handler):
             if not path.is_file():
                 return handler.reply(404, {"error": "取样规划不存在，请重新生成。"})
             plan = with_left_positive_x(json.loads(path.read_text(encoding="utf-8")))
-            if getattr(handler.server, 'fixed_origin', None):
+            if getattr(handler.server,'screw_origin',None):
+                meta=json.loads((folder/'metadata.json').read_text(encoding='utf-8'))
+                expected=origin_from_metadata(meta)
+                c=plan.get('calibration',{})
+                if c.get('coordinate_origin') != expected or c.get('dish_diameter_mm') != DISH_DIAMETER_MM:
+                    raise ValueError('该规划未使用本张照片的螺丝定位结果，请重新识别并生成坐标。')
+                if plan.get('screw_origin') != meta.get('screw_origin'):
+                    raise ValueError('该规划的螺丝定位记录不匹配，请重新生成坐标。')
+            elif getattr(handler.server, 'fixed_origin', None):
                 c = plan.get('calibration', {})
                 expected = origin_for_image(handler.server.fixed_origin, c.get('image_width'), c.get('image_height'))
                 if c.get('coordinate_origin') != expected:

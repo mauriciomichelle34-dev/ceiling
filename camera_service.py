@@ -293,6 +293,12 @@ class CameraService:
             self.illumination.configure(body)
         return self.status()
 
+    def initialize_light(self):
+        with self._operation():
+            if self.illumination:
+                self.illumination.turn_off('startup')
+        return self.status()
+
     def probe_light(self):
         with self._operation():
             if self.illumination is None:
@@ -339,6 +345,10 @@ class CameraService:
                 if record['capture_id']!=capture_id or record['route']!=route:
                     raise CameraError('该拍照请求已在其他处理模式下执行，请重新点击拍照。')
             else:
+                # Clear retained/manual ON before any SDK access, including failures
+                # while reading trigger/acquisition settings before exposure().
+                if self.illumination:
+                    self.illumination.turn_off('before_capture')
                 if self.device is None:
                     raise CameraError('请先搜索并连接相机。')
                 adapter = self._adapter()
@@ -369,6 +379,12 @@ class CameraService:
 
     def close(self):
         with self.operation:
-            if self.adapter:
-                self.adapter.close()
-                self.adapter = self.device = None
+            try:
+                if self.illumination:
+                    self.illumination.turn_off('shutdown')
+            finally:
+                if self.adapter:
+                    try:
+                        self.adapter.close()
+                    finally:
+                        self.adapter = self.device = None

@@ -46,7 +46,7 @@ function updateAutomaticControls() {
   $('automaticStartHint').textContent = automaticEnabled ? '自动流程已启动。'
     : active ? '当前任务尚未结束，请等待后再启动。'
     : busy ? '正在处理照片，请等待完成。'
-    : !ready ? '正在等待识别服务及固定原点加载。'
+    : !ready ? '正在等待识别服务及原点配置加载。'
     : !valid ? reason
     : reference.reused ? `可复用最近一次识别成功的相机照片（${reference.meta.width} × ${reference.meta.height}）；点击启动后才监听 PLC 并下发。`
     : '参数已就绪，点击启动后才开始自动处理。';
@@ -76,7 +76,7 @@ function renderAutomatic(data) {
   $('automaticBadge').classList.toggle('saved', data.enabled);
   const settings = data.settings;
   $('automaticSettings').textContent = settings
-    ? `${plcCamera ? 'PLC 到位自动拍照' : mode === 'coordinates_only' ? '坐标覆盖测试' : '联动执行'}；固定参数：${settings.image_width} × ${settings.image_height} px；培养皿 ${settings.calibration.dish_diameter_mm} mm；取样圆 ${settings.diameter_mm} mm；间隙 ${settings.gap_mm} mm。${settings.calibration.coordinate_origin ? '后台自动使用固定螺丝原点；每张照片重新定位皿中心。' : '旧参数使用培养皿中心，请设置螺丝原点后重新保存参数。'}`
+    ? `${plcCamera ? 'PLC 到位自动拍照' : mode === 'coordinates_only' ? '坐标覆盖测试' : '联动执行'}；固定参数：${settings.image_width} × ${settings.image_height} px；培养皿 ${settings.calibration.dish_diameter_mm} mm；取样圆 ${settings.diameter_mm} mm；间隙 ${settings.gap_mm} mm。${settings.calibration.coordinate_origin ? '每张照片自动定位银色螺丝和培养皿；螺丝定位失败时沿用最近成功位置。' : '旧参数使用培养皿中心，请设置螺丝原点后重新保存参数。'}`
     : '首次使用：拍照或上传参考照片后，设置取样参数并启动自动处理。';
   const active = data.jobs.find(job => job.job_id === data.active_job_id);
   const latest = active || data.jobs[0];
@@ -146,7 +146,7 @@ async function refreshAutomatic() {
 async function startAutomatic(useSaved) {
   if (busy) return;
   try {
-    if (!ready) throw Error('请等待识别服务及固定原点加载。');
+    if (!ready) throw Error('请等待识别服务及原点配置加载。');
     const reference = useSaved ? null : automaticReference();
     const source = $('automaticSource').value;
     if (source === 'plc_camera') {
