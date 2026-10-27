@@ -91,20 +91,50 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(state.events, [('light', '4', 0)])
         self.assertFalse(state.on)
 
-    def test_configuration_persists_without_any_network_operation(self):
+    def test_disabling_persists_and_clears_retained_on(self):
         state = SimulatedLight()
+        state.on = True
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / 'light.json'
             light = LightService(LightConfig(), path, connector=state.connect)
             light.configure({'enabled': False, 'brightness': 123})
             self.assertEqual(LightConfig.load(path).brightness, 123)
             self.assertFalse(LightConfig.load(path).enabled)
-            self.assertEqual(state.connections, 0)
+            self.assertEqual(state.connections, 1)
+            self.assertFalse(state.on)
+            self.assertEqual(state.events, [('light', '2', 0)])
             for body in ({'enabled': True, 'brightness': 0}, {'enabled': 1, 'brightness': 100},
                          {'enabled': True, 'brightness': 100.5}, {'host': '127.0.0.1'}):
                 with self.assertRaises(ValueError):
                     light.configure(body)
             self.assertEqual(LightConfig.load(path).brightness, 123)
+
+    def test_idle_off_retries_and_invalidates_old_confirmation_on_failure(self):
+        state = SimulatedLight()
+        state.on = True
+        light = LightService(LightConfig(enabled=False), connector=state.connect, sleeper=lambda _: None)
+        state.off_failures = 1
+        status = light.turn_off('startup')
+        self.assertFalse(state.on)
+        self.assertTrue(status['off_confirmed'])
+        self.assertEqual(status['last_off']['reason'], 'startup')
+        self.assertEqual(state.connections, 2)
+        state.on, state.off_failures = True, 2
+        with self.assertRaises(LightError):
+            light.turn_off('shutdown')
+        self.assertFalse(light.status()['off_confirmed'])
+        self.assertTrue(state.on)
+
+    def test_failed_off_does_not_save_disabled_configuration(self):
+        state = SimulatedLight()
+        state.off_failures = 2
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'light.json'
+            light = LightService(LightConfig(), path, connector=state.connect, sleeper=lambda _: None)
+            with self.assertRaises(LightError):
+                light.configure({'enabled': False, 'brightness': 100})
+            self.assertTrue(light.config.enabled)
+            self.assertFalse(path.exists())
 
 
 class CaptureLightTests(unittest.TestCase):
@@ -171,6 +201,13 @@ class CaptureLightTests(unittest.TestCase):
 
     def test_off_failure_blocks_encoding_and_downstream_processing(self):
         self.state.off_failures = 2
+        # The preflight OFF must succeed; fail the later OFF after camera trigger.
+        original = self.native.MV_CC_SetCommandValue
+        def trigger(name):
+            self.state.off_failures = 2
+            return original(name)
+        self.state.off_failures = 0
+        self.native.MV_CC_SetCommandValue = trigger
         processed = []
         with tempfile.TemporaryDirectory() as temp:
             service = CameraService(CameraConfig(), temp, illumination=self.light)
@@ -185,9 +222,35 @@ class CaptureLightTests(unittest.TestCase):
 
     def test_disabled_light_does_no_io_and_capture_still_works(self):
         self.light.configure({'enabled': False, 'brightness': 100})
+        self.state.events.clear()
+        connections = self.state.connections
         self.adapter.capture(illumination=self.light)
-        self.assertEqual(self.state.connections, 0)
+        self.assertEqual(self.state.connections, connections)
         self.assertFalse(any(event[0] == 'light' for event in self.native.events))
+
+    def test_service_preflight_off_even_if_sdk_fails_before_exposure(self):
+        self.state.on = True
+        self.native.selector_failure = True
+        with tempfile.TemporaryDirectory() as temp:
+            service = CameraService(CameraConfig(), temp, illumination=self.light)
+            service.adapter, service.device = self.adapter, {'id': 'SIM'}
+            with self.assertRaises(CameraError):
+                service.capture('early-failure', 'analysis', lambda *args: self.fail('must not process'))
+        self.assertFalse(self.state.on)
+        self.assertEqual(self.light.status()['last_off']['reason'], 'before_capture')
+        self.assertNotIn(('light', '1', 0), self.native.events)
+
+    def test_service_startup_and_close_clear_latched_on_without_camera(self):
+        with tempfile.TemporaryDirectory() as temp:
+            service = CameraService(CameraConfig(), temp, illumination=self.light)
+            self.state.on = True
+            service.initialize_light()
+            self.assertFalse(self.state.on)
+            self.assertIsNone(service.adapter)
+            self.state.on = True
+            service.close()
+            self.assertFalse(self.state.on)
+            self.assertEqual(self.light.status()['last_off']['reason'], 'shutdown')
 
     def test_duplicate_capture_does_not_repeat_light_or_processing(self):
         processed = []

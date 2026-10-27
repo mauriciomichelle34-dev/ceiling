@@ -44,3 +44,11 @@ python -m unittest discover -s tests -p "test_*.py" -v
 ## 刷新后自动启动按钮修复
 
 `node --test tests/test_automatic_start_ui.cjs tests/test_auto_planning_ui.cjs`：10 项前端行为测试通过。刷新后可复用最近一次识别成功的相机照片标定，按钮验证与启动请求使用相同参考；失败照片、旧标定、画幅不匹配、服务未就绪和正在运行的任务仍阻止启动，并显示原因。加载参考或更新控件不会自行启动流程，也不会发送 PLC 请求。
+# 自动银色螺丝原点（v27）
+
+147 项 Python 测试和 13 项前端测试通过。前端命令：`node --test tests/test_auto_planning_ui.cjs tests/test_automatic_start_ui.cjs tests/test_screw_origin_ui.cjs`。新增原点测试不连接现场设备；覆盖自动定位、位移、多候选拒绝、上次成功位置回退与持久化，以及照片、规划与 PLC 预览的原点绑定。
+
+## 空闲关灯（v28）
+
+151 项 Python 测试通过。模拟光源覆盖启动及退出清除持续亮灯、停用补光时实际关灯、SDK 准备阶段报错前关灯、关灯重试与失败后清除旧确认状态。停用补光时关灯失败不会保存成功状态；原有曝光期间的开灯、取图、关灯时序测试继续通过。
+
