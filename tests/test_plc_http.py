@@ -79,7 +79,8 @@ class HTTPTests(unittest.TestCase):
         code, plan = self.post('/api/plans/create', {
             'prediction_id': self.prediction_id,
             'calibration': {'center_x_px': 120, 'center_y_px': 120,
-                            'dish_diameter_px': 200, 'dish_diameter_mm': 90},
+                            'dish_diameter_px': 200, 'dish_diameter_mm': 90,
+                            'coordinate_origin': {'kind':'fixed_screw','x_px':220,'y_px':220,'image_width':240,'image_height':240}},
             'diameter_mm': 20, 'gap_mm': 0.5, 'default_depth_mm': 1})
         self.assertEqual(code, 200, plan)
         self.assertGreater(plan['count'], 0)
@@ -88,6 +89,10 @@ class HTTPTests(unittest.TestCase):
         before = bytes(self.memory)
         code, preview = self.post('/api/plc/preview', reference)
         self.assertEqual(code, 200, preview)
+        self.assertEqual(preview['units_per_mm'], 10)
+        self.assertIn('0.1 mm', preview['rounding'])
+        with urlopen(self.base+'/api/health') as response:
+            self.assertEqual(json.load(response)['plc_units_per_mm'], 10)
         self.assertEqual(bytes(self.memory), before)
         # Caller-supplied coordinates are ignored: only the saved plan is sent.
         code, sent = self.post('/api/plc/send', dict(reference, points=[{'x_mm': 999, 'y_mm': 999}]))
@@ -137,14 +142,15 @@ class HTTPTests(unittest.TestCase):
         plan_id='c'*32
         folder=self.results/self.prediction_id/'plans'/plan_id
         folder.mkdir(parents=True,exist_ok=True)
-        stored={'plan_id':plan_id,'count':1,'points':[{'x_mm':7.89,'y_mm':-2.34}]}
+        stored={'plan_id':plan_id,'count':1,'points':[{'x_mm':7.89,'y_mm':-2.34}],
+                'coordinate_frame':{'xy_origin':'fixed_screw','x_positive':'image_left','y_positive':'image_up'}}
         (folder/'plan.json').write_text(json.dumps(stored),encoding='utf-8')
         self.memory[4]=5
         code,data=self.post('/api/plc/test-write',{'prediction_id':self.prediction_id,'plan_id':plan_id})
         self.assertEqual(code,200,data)
         self.assertEqual(data['mode'],'coordinates_only')
         self.assertEqual(self.memory[4],4)
-        self.assertEqual(struct.unpack('>ii',self.memory[10:18]),(789,-234))
+        self.assertEqual(struct.unpack('>ii',self.memory[10:18]),(79,-23))
 
 
 if __name__ == '__main__':

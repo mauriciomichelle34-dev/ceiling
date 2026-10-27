@@ -23,12 +23,13 @@ class CoordinateAxisTests(unittest.TestCase):
         y,x = np.ogrid[:240,:240]
         mask = ((x-120)**2+(y-120)**2<=85**2).astype(np.uint8)
         cls.plan = make_plan(mask,{'center_x_px':120,'center_y_px':120,
-            'dish_diameter_px':200,'dish_diameter_mm':90},20,0.5,1)
+            'dish_diameter_px':200,'dish_diameter_mm':90,
+            'coordinate_origin':{'kind':'fixed_screw','x_px':120,'y_px':120,'image_width':240,'image_height':240}},20,0.5,1)
 
     def test_left_is_positive_and_image_geometry_y_depth_are_preserved(self):
         plan = self.plan
         self.assertEqual(plan['coordinate_frame']['x_positive'],'image_left')
-        self.assertEqual(plan['coordinate_frame']['xy_origin'],'dish_center')
+        self.assertEqual(plan['coordinate_frame']['xy_origin'],'fixed_screw')
         left = [p for p in plan['points'] if p['image_x_px']<119.999]
         right = [p for p in plan['points'] if p['image_x_px']>120.001]
         self.assertTrue(left); self.assertTrue(right)
@@ -93,11 +94,11 @@ class LegacyCoordinateHTTPTests(unittest.TestCase):
             rows = list(csv.DictReader(io.StringIO(response.read().decode('utf-8-sig'))))
         code, preview = self.fixture.post(self,'/api/plc/preview',{
             'prediction_id':self.fixture.prediction_id,'plan_id':identifier})
-        self.assertEqual(code,200,preview)
+        self.assertEqual(code,400,preview)
+        self.assertIn('旧的培养皿中心规划已停用',preview['error'])
         self.assertEqual([p['x_mm'] for p in current['points']],[12.34,-8.9])
         self.assertEqual([p['y_mm'] for p in current['points']],[5.67,-2.3])
         self.assertEqual([float(p['x_mm']) for p in rows],[12.34,-8.9])
-        self.assertEqual([p['x'] for p in preview['points']],[1234,-890])
         self.assertEqual(current['coordinate_frame']['x_positive'],'image_left')
         self.assertEqual(path.read_bytes(),saved)
 

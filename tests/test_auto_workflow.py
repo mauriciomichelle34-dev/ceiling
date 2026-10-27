@@ -22,7 +22,8 @@ from test_plc_transfer import FakeConnection, plan
 def settings(timeout=2):
     return {'image_width':240, 'image_height':240,
             'calibration':{'center_x_px':120, 'center_y_px':120,
-                           'dish_diameter_px':200, 'dish_diameter_mm':90},
+                           'dish_diameter_px':200, 'dish_diameter_mm':90,
+                           'coordinate_origin':{'kind':'fixed_screw','x_px':220,'y_px':220,'image_width':240,'image_height':240}},
             'diameter_mm':20, 'gap_mm':0.5, 'default_depth_mm':1, 'plc_timeout_s':timeout}
 
 
@@ -47,6 +48,7 @@ class TestPredictor:
         Image.fromarray((((x-120)**2+(y-120)**2) <= 85**2).astype(np.uint8)).save(folder/'mask.png')
         Image.open(io.BytesIO(raw)).save(folder/'original.jpg')
         meta = {'id':identifier, 'name':name, 'width':240, 'height':240,
+                'dish_suggestion':{'center_x_px':120,'center_y_px':120,'dish_diameter_px':200},
                 'dish_boundary':{'radius_px':100},
                 **{key:f'/results/{identifier}/{filename}' for key,filename in
                    [('original','original.jpg'),('region','region.png'),('region_outline','region_outline.png')]}}

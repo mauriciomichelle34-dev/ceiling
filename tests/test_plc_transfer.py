@@ -14,6 +14,7 @@ from plc_transfer import PLCConfig, PLCTransfer, TransferError, prepare_plan, sc
 
 def plan(count=2):
     return {'plan_id': 'b'*32, 'count': count,
+            'coordinate_frame': {'xy_origin':'fixed_screw','x_positive':'image_left','y_positive':'image_up'},
             'points': [{'id': i+1, 'x_mm': 12.345 if i % 2 == 0 else -3.215,
                         'y_mm': -0.005 if i % 2 == 0 else 5, 'z_mm': 3}
                        for i in range(count)]}
@@ -66,14 +67,15 @@ class TransferTests(unittest.TestCase):
         return [e for e in self.connection.events if e[0] in ('write', 'signal')]
 
     def test_rounding_sign_and_precision(self):
-        for raw, expected in [('12.345', 1235), ('-12.345', -1235),
-                              ('-0.005', -1), ('0.0049', 0), ('1', 100)]:
+        for raw, expected in [('12.345', 123), ('-12.345', -123),
+                              ('12.35', 124), ('-12.35', -124),
+                              ('-0.05', -1), ('0.049', 0), ('1', 10)]:
             self.assertEqual(scaled_coordinate(Decimal(raw), 'X'), expected)
 
     def test_dint_boundaries(self):
-        self.assertEqual(scaled_coordinate(Decimal('-21474836.48'), 'X'), -2**31)
-        self.assertEqual(scaled_coordinate(Decimal('21474836.47'), 'X'), 2**31-1)
-        for value in [Decimal('21474836.475'), Decimal('-21474836.485'),
+        self.assertEqual(scaled_coordinate(Decimal('-214748364.8'), 'X'), -2**31)
+        self.assertEqual(scaled_coordinate(Decimal('214748364.7'), 'X'), 2**31-1)
+        for value in [Decimal('214748364.75'), Decimal('-214748364.85'),
                       float('inf'), float('nan'), True, None, '1.2']:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 scaled_coordinate(value, 'X')
@@ -98,7 +100,7 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.connection.memory[5:10], b'abcde')
         for index in range(64):
             offset = 10 + index * 10
-            expected = (1235, -1) if index % 2 == 0 else (-322, 500)
+            expected = (123, 0) if index % 2 == 0 else (-32, 50)
             self.assertEqual(struct.unpack('>ii', self.connection.memory[offset:offset+8]), expected)
             self.assertEqual(self.connection.memory[offset+8:offset+10], before[offset+8:offset+10])
         writes = self.writes()
@@ -187,9 +189,9 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(self.connection.memory[4], 0b10110110)
         self.assertEqual(self.writes()[0], ('signal', False))
         self.assertEqual(self.connection.memory[18:20], before[18:20])
-        smaller = {'count':1, 'points':[{'x_mm':7.89,'y_mm':-2.34}]}
+        smaller = dict(plan(1), points=[{'x_mm':7.89,'y_mm':-2.34}])
         self.transfer.write_coordinates(smaller)
-        self.assertEqual(struct.unpack('>ii',self.connection.memory[10:18]),(789,-234))
+        self.assertEqual(struct.unpack('>ii',self.connection.memory[10:18]),(79,-23))
         self.assertEqual(struct.unpack('>i',self.connection.memory[:4])[0],1)
         self.assertEqual([e for e in self.writes() if e[0]=='signal'], [('signal',False),('signal',False)])
 
@@ -231,8 +233,8 @@ class RealS7Tests(unittest.TestCase):
             server.start_to('127.0.0.1',port)
             transfer=PLCTransfer(PLCConfig(host='127.0.0.1',port=port))
             transfer.write_coordinates(plan(2))
-            transfer.write_coordinates({'count':1,'points':[{'x_mm':8,'y_mm':-9}]})
-            self.assertEqual(struct.unpack('>ii',memory[10:18]),(800,-900))
+            transfer.write_coordinates(dict(plan(1), points=[{'x_mm':8,'y_mm':-9}]))
+            self.assertEqual(struct.unpack('>ii',memory[10:18]),(80,-90))
             self.assertEqual(struct.unpack('>i',memory[:4])[0],1)
             self.assertEqual(memory[4],4)
             self.assertEqual(server.bit_writes,[(100,4,0,False),(100,4,0,False)])
@@ -257,7 +259,7 @@ class RealS7Tests(unittest.TestCase):
             result = transfer.send(plan(64))
             self.assertTrue(result['verified'])
             self.assertEqual(memory[4], 0b10110011)
-            self.assertEqual(struct.unpack('>ii', memory[640:648]), (-322, 500))
+            self.assertEqual(struct.unpack('>ii', memory[640:648]), (-32, 50))
             self.assertEqual(struct.unpack('>h', memory[648:650])[0], 163)
             self.assertEqual(transfer.status()['count'], 64)
             memory[4] |= 4
